@@ -30,7 +30,7 @@ print("...Libraries loaded.")
 
 
 root_path_ = "data/"
-filenames = os.listdir(os.path.join(root_path_, 'graph_data_v11'))
+filenames = os.listdir(os.path.join(root_path_, 'graph_dataset_11m'))
 filenames = [f"graph_data_v11/{filename}" for filename in filenames if filename.endswith(".pt")]
 
 """
