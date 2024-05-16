@@ -24,12 +24,17 @@ from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader as GeoDataLoader
 
 from scipy.spatial.distance import pdist, squareform
+print(f"GPUS available: {torch.cuda.device_count()}")
+
+
 print("Imports Loaded In")
+
 
 
 # Fix fastai bug to enable fp16 training with dictionaries
 import torch
 from fastai.vision.all import *
+
 def flatten(o):
     "Concatenate all collections and items as a generator"
     for item in o:
@@ -186,7 +191,10 @@ class MolGNN(torch.nn.Module):
         x = global_mean_pool(x, batch)
         return x
 
+print(f"GPUS available: {torch.cuda.device_count()}")
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Device: {device}")
 
 
 target = 'HSA'
