@@ -1,3 +1,4 @@
+
 from fastai.vision.all import *
 from sklearn.ensemble import VotingRegressor
 from sklearn.linear_model import LinearRegression
@@ -31,6 +32,7 @@ import pandas as pd
 import polars as pl
 import time
 import torch
+import __main__
 
 import torch.multiprocessing as mp
 
@@ -46,11 +48,15 @@ print(f"GPUS available: {torch.cuda.device_count()}")
 
 print("Imports Loaded")
 
-BUILDING_BLOCKS_PATH ='data/all_buildingblock.pkl'
-DATA_PATH = 'data/5mNegs_allp.csv' # 30mNegs_allp
+#BUILDING_BLOCKS_PATH ='data/all_buildingblock.pkl'
+#DATA_PATH = 'data/5mNegs_allp.csv' # 30mNegs_allp
 
-#BUILDING_BLOCKS_PATH = '/kaggle/input/dna-protien/all_buildingblock.pkl'
-#DATA_PATH = '/kaggle/input/dna-protien/5mNegs_allp.csv' 
+BUILDING_BLOCKS_PATH = '/kaggle/input/dna-protien/all_buildingblock.pkl'
+DATA_PATH = '/kaggle/input/dna-protien/5mNegs_allp.csv' 
+
+BUILDING_BLOCKS_PATH = '/content/data/all_buildingblock.pkl'
+DATA_PATH = '/content/data/5mNegs_allp.csv' 
+
 
 bbs = pd.read_pickle(BUILDING_BLOCKS_PATH)
 all_dtis = pd.read_csv(DATA_PATH)
@@ -109,20 +115,26 @@ class MultiGraphDataset(Dataset):
 
         # Preload all graphs into a numpy array
         self.graphs = [self.prepare_graph(row['mol_graph']) for index, row in self.block_df.iterrows()]
-        
-        self.ids = self.reaction_df[['buildingblock1_id', 'buildingblock2_id', 'buildingblock3_id']].to_numpy().astype(int)
+
+        #self.reaction_df = reaction_df.dropna()
+
+        self.ids = self.reaction_df[['buildingblock1_id', 'buildingblock2_id', 'buildingblock3_id']].to_numpy()
+
         y_data = self.reaction_df[['binds_BRD4', 'binds_HSA', 'binds_sEH']].to_numpy().astype(int)
         self.y = torch.tensor(y_data, dtype=torch.float, device=device)
         self.mode = 'train' if train else 'eval'
 
     def __len__(self):
-        return len(self.y)
+        return len(self.ids)
 
     def __getitem__(self, idx):
-        # Assuming each block_id indexes directly into self.graphs
-        graph1 = self.graphs[self.ids[idx, 0]]
-        graph2 = self.graphs[self.ids[idx, 1]]
-        graph3 = self.graphs[self.ids[idx, 2]]
+        #Assuming each block_id indexes directly into self.graphs
+        idx1 = self.ids[idx, 0]
+        graph1 = self.graphs[idx1]
+        idx2 = self.ids[idx, 0]
+        graph2 = self.graphs[idx2]
+        idx3 = self.ids[idx, 0]
+        graph3 = self.graphs[idx3]
         y = self.y[idx]
 
         # Prepare a single batched graph if your downstream process expects that,
@@ -230,23 +242,21 @@ criterion = nn.BCEWithLogitsLoss(pos_weight=weights[1])
 scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs - 1, eta_min=0)
 scaler = GradScaler()
 
-protein_index = {'BRD4': 0, 'HSA': 1, 'sEH': 2}  # Default to 0th index if protein not found
-
-
-model_save_path = 'models/model_1.pth'
-best_map = 0.0
 
 
 def ddp_setup(rank, world_size):
     """
-    Args:
-        rank: Unique identifier of each process
-        world_size: Total number of processes
+      Args:
+          rank: Unique identifier of each process
+          world_size: Total number of processes
     """
-    os.environ["MASTER_ADDR"] = "localhost"
-    os.environ["MASTER_PORT"] = "12355"
-    init_process_group(backend="nccl", rank=rank, world_size=world_size)
-    torch.cuda.set_device(rank)
+    try: 
+      os.environ["MASTER_ADDR"] = "localhost"
+      os.environ["MASTER_PORT"] = "12355"
+      init_process_group(backend="nccl", rank=rank, world_size=world_size)
+      torch.cuda.set_device(rank)
+    except Exception as e:
+      print(f"Error initalizing DDP: {e}")
 
 class Trainer:
     def __init__(
@@ -263,6 +273,10 @@ class Trainer:
         self.optimizer = optimizer
         self.save_every = save_every
         self.model = DDP(self.model, device_ids=[self.gpu_id])
+        self.best_map = 0.0
+        self.model_save_path = 'model_1.pth'
+        protein_index = {'BRD4': 0, 'HSA': 1, 'sEH': 2}  # Default to 0th index if protein not found
+
 
     def _run_batch(self, batch, train=True, protein_index=None):
         with autocast():
@@ -305,7 +319,6 @@ class Trainer:
             pbar.set_postfix(loss=f"{total_loss / (i + 1):.4f}", lr=f"{lr:.6f}") 
 
         # Step the scheduler only after warm-up is complete
-        #if epoch >= 1:
         scheduler.step()
 
         # Validation and Metric Calculation
@@ -313,6 +326,7 @@ class Trainer:
         model_outputs = []
         true_labels = []
         vloss = 0
+        
         with torch.no_grad():
             for batch in dl_val:
                 outputs, labels, val_loss = self._run_batch(batch, train=False, protein_index=None)
@@ -326,9 +340,11 @@ class Trainer:
 
         # Calculate Mean Average Precision (micro)
         map_micro = average_precision_score(true_labels.numpy(), model_outputs, average='micro')
-        if map_micro > best_map:
-            best_map = map_micro
-            torch.save(model.state_dict(), model_save_path)
+        
+        if map_micro > self.best_map:
+            self.best_map = map_micro
+            torch.save(model.state_dict(), self.model_save_path)
+        
         print(f"Epoch {epoch+1}, Train Loss: {(total_loss / len(dl_train)):.4f}, Val Loss: {(vloss/len(dl_val)):.4f},Val MAP (micro): {map_micro:.5f},Time: {(time.time() - start_time)/60:.2f}m\n----")
         
 
@@ -345,13 +361,12 @@ class Trainer:
                 self._save_checkpoint(epoch)
 
 def prepare_dataloader(dataset, batch_size):
-    return GeoDataLoader(dataset, batch_size, sampler=DistributedSampler(dataset))
+    return GeoDataLoader(dataset, batch_size, shuffle=False, sampler=DistributedSampler(dataset))
 
 
 def get_dataset():
     ds_train = MultiGraphDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=True, test=False)
-    dl_train = GeoDataLoader(ds_train, batch_size=512, shuffle=True)
-    return dl_train
+    return ds_train
 
 def get_model():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -382,12 +397,13 @@ def main_function(rank, world_size, save_every, total_epochs, batch_size):
     trainer = Trainer(model, train_data, optimizer, rank, save_every)
     trainer.train(total_epochs)
     destroy_process_group()
-    
+
+print("Running")
 
 if __name__ == "__main__":
     batch_size = 512 
     total_epochs = 10
     save_every = 10
     world_size = torch.cuda.device_count()  # shorthand for cuda:0
-    mp.spawn(main_function, args=(world_size, save_every, total_epochs, batch_size), nprocs=world_size)
-
+    main_function(0, 1, save_every, total_epochs, batch_size)
+    #mp.spawn(main_function, args=(world_size, save_every, total_epochs, batch_size), nprocs=world_size)
