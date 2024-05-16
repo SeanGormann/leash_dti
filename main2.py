@@ -192,12 +192,12 @@ device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 target = 'HSA'
 #for fold in [0]: # running multiple folds at kaggle may cause OOM
 ds_train = MultiGraphDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=True, test=False)
-dl_train = GeoDataLoader(ds_train, batch_size=2048, shuffle=True)#, collate_fn=custom_collate_fn). 192 2048
+dl_train = GeoDataLoader(ds_train, batch_size=512, shuffle=True)#, collate_fn=custom_collate_fn). 192 2048
 #dl_train = DeviceDataLoader(dl_train, device)
 
 
 ds_val = MultiGraphDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=False)
-dl_val= GeoDataLoader(ds_val, batch_size=2048,  shuffle=True)#, collate_fn=custom_collate_fn)
+dl_val= GeoDataLoader(ds_val, batch_size=512,  shuffle=True)#, collate_fn=custom_collate_fn)
 #dl_val = DeviceDataLoader(dl_val, device)
 
 gc.collect()
