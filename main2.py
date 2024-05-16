@@ -7,15 +7,8 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 import time
 import gc
-
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.Chem import Descriptors
-from rdkit.Chem import rdMolDescriptors
-from rdkit.Chem import PandasTools
 
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold
