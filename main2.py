@@ -7,15 +7,8 @@ import time
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-import seaborn as sns
 import time
 import gc
-
-from rdkit import Chem
-from rdkit.Chem import AllChem
-from rdkit.Chem import Descriptors
-from rdkit.Chem import rdMolDescriptors
-from rdkit.Chem import PandasTools
 
 from sklearn.model_selection import train_test_split
 from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold
@@ -31,12 +24,17 @@ from torch.utils.data import Dataset
 from torch_geometric.loader import DataLoader as GeoDataLoader
 
 from scipy.spatial.distance import pdist, squareform
+print(f"GPUS available: {torch.cuda.device_count()}")
+
+
 print("Imports Loaded In")
+
 
 
 # Fix fastai bug to enable fp16 training with dictionaries
 import torch
 from fastai.vision.all import *
+
 def flatten(o):
     "Concatenate all collections and items as a generator"
     for item in o:
@@ -193,18 +191,21 @@ class MolGNN(torch.nn.Module):
         x = global_mean_pool(x, batch)
         return x
 
+print(f"GPUS available: {torch.cuda.device_count()}")
+
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+print(f"Device: {device}")
 
 
 target = 'HSA'
 #for fold in [0]: # running multiple folds at kaggle may cause OOM
 ds_train = MultiGraphDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=True, test=False)
-dl_train = GeoDataLoader(ds_train, batch_size=2048, shuffle=True)#, collate_fn=custom_collate_fn). 192 2048
+dl_train = GeoDataLoader(ds_train, batch_size=512, shuffle=True)#, collate_fn=custom_collate_fn). 192 2048
 #dl_train = DeviceDataLoader(dl_train, device)
 
 
 ds_val = MultiGraphDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=False)
-dl_val= GeoDataLoader(ds_val, batch_size=2048,  shuffle=True)#, collate_fn=custom_collate_fn)
+dl_val= GeoDataLoader(ds_val, batch_size=512,  shuffle=True)#, collate_fn=custom_collate_fn)
 #dl_val = DeviceDataLoader(dl_val, device)
 
 gc.collect()
