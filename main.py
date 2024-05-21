@@ -39,13 +39,6 @@ import torch.nn.functional as F
 
 from scipy.spatial.distance import pdist, squareform
 
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-print(f"Device: {device}")
-print(f"GPUS available: {torch.cuda.device_count()}")
-
-print("Imports Loaded")
-
 #BUILDING_BLOCKS_PATH ='data/all_buildingblock.pkl'
 #DATA_PATH = 'data/5mNegs_allp.csv' # 30mNegs_allp
 
@@ -55,21 +48,6 @@ DATA_PATH = 'data/5mNegs_allp.csv'
 BUILDING_BLOCKS_PATH = 'data/all_buildingblock.pkl'
 DATA_PATH = 'data/5mNegs_allp.csv' 
 
-
-bbs = pd.read_pickle(BUILDING_BLOCKS_PATH)
-all_dtis = pd.read_csv(DATA_PATH)
-
-#Oversampling
-y_data = all_dtis[['binds_BRD4', 'binds_HSA', 'binds_sEH']].to_numpy().astype(int)
-brd4_positive_indices = np.where(y_data[:, 0] == 1)[0]
-hsa_positive_indices = np.where(y_data[:, 1] == 1)[0]
-brd4_oversampled_rows = all_dtis.iloc[brd4_positive_indices].copy()
-hsa_oversampled_rows = all_dtis.iloc[hsa_positive_indices].copy()
-
-all_dtis = pd.concat([all_dtis, brd4_oversampled_rows, hsa_oversampled_rows])
-all_dtis = all_dtis.sample(frac=1).reset_index(drop=True) # Shuffle the dataframe
-
-print("Data Loaded")
 
 def flatten(o):
     "Concatenate all collections and items as a generator"
@@ -198,15 +176,12 @@ class MolGNN(torch.nn.Module):
         x = self.dropout(F.relu(self.fc2(x)))
         x = self.dropout(F.relu(self.fc25(x)))
         x = self.fc3(x)
-
-
         return x
 
     def process_graph_component(self, x, edge_index, batch, conv_layer):
         x = F.relu(conv_layer(x, edge_index))
         x = global_mean_pool(x, batch)
         return x
-
 
 
 def ddp_setup(rank, world_size, port="12356"):
@@ -218,21 +193,17 @@ def ddp_setup(rank, world_size, port="12356"):
     print("Setting Up DDP")
     try: 
       os.environ["MASTER_ADDR"] = "localhost"
-      #os.environ["MASTER_PORT"] = "12355"
       os.environ['MASTER_PORT'] = port 
-
       init_process_group(backend="nccl", rank=rank, world_size=world_size)
       print("Process Group Initialised, Setting Device Rank")
       torch.cuda.set_device(rank)
       print("DDP Initialised")
     except Exception as e:
       print(f"Error initalizing DDP: {e}")
-        
 
 class Trainer:
     def __init__(self, model, train_data, val_data, optimizer, scheduler, criterion, scaler, gpu_id, save_every, device):
         self.gpu_id = gpu_id
-        #self.model = DDP(model.to(gpu_id), device_ids=[gpu_id])
         print(f"GID: {gpu_id}, device: {device}")
         self.model = DDP(model.to(gpu_id), device_ids=[gpu_id], find_unused_parameters=True)
         self.train_data = train_data
@@ -290,6 +261,7 @@ class Trainer:
     def _run_epoch(self, epoch, n_epochs):
         start_time = time.time()
         self.model.train()
+        self.train_data.sampler.set_epoch(epoch)
         total_loss = 0
         train_outputs, train_targets = [], []
         pbar = tqdm(enumerate(self.train_data), total=len(self.train_data), desc=f"Epoch {epoch + 1}/{n_epochs}")
@@ -372,6 +344,20 @@ def prepare_dataloader(dataset, batch_size, rank, world_size):
     return GeoDataLoader(dataset, batch_size=batch_size, sampler=sampler)
 
 def get_dataset(device, fold=0, nfolds=20, train=True, test=False):
+    bbs = pd.read_pickle(BUILDING_BLOCKS_PATH)
+    all_dtis = pd.read_csv(DATA_PATH)
+    
+    #Oversampling
+    y_data = all_dtis[['binds_BRD4', 'binds_HSA', 'binds_sEH']].to_numpy().astype(int)
+    brd4_positive_indices = np.where(y_data[:, 0] == 1)[0]
+    hsa_positive_indices = np.where(y_data[:, 1] == 1)[0]
+    brd4_oversampled_rows = all_dtis.iloc[brd4_positive_indices].copy()
+    hsa_oversampled_rows = all_dtis.iloc[hsa_positive_indices].copy()
+    
+    all_dtis = pd.concat([all_dtis, brd4_oversampled_rows, hsa_oversampled_rows])
+    all_dtis = all_dtis.sample(frac=1).reset_index(drop=True) # Shuffle the dataframe
+    
+    print("Data Loaded")
     ds_train = MultiGraphDataset(all_dtis, bbs, device=device, fold=fold, nfolds=nfolds, train=train, test=test)
     return ds_train
 
@@ -399,7 +385,7 @@ def load_train_objs(device, total_epochs):
     return train_set, model, optimizer, scheduler, scaler, criterion
 
 def main_function(rank, world_size, save_every, total_epochs, batch_size):
-    ddp_setup(rank, world_size, "12350")
+    ddp_setup(rank, world_size, "12351")
     device = torch.device(f'cuda:{rank}')
     dataset, model, optimizer, scheduler, scaler, criterion = load_train_objs(device, total_epochs)
     val_data = get_dataset(device, fold=0, nfolds=20, train=False, test=False)
@@ -409,9 +395,13 @@ def main_function(rank, world_size, save_every, total_epochs, batch_size):
     trainer.train(total_epochs)
     destroy_process_group()
     
-print("Running")
+
 
 if __name__ == "__main__":
+    print("Running")
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"Device: {device}")
+    print(f"GPUS available: {torch.cuda.device_count()}")
     batch_size = 512
     total_epochs = 10
     save_every = 10
