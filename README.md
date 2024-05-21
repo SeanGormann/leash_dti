@@ -45,3 +45,12 @@ cd ..
 ```
 python main.py
 ```
+
+<h2>Monitor GPU Usage</h2>
+
+```
+watch -n0.1 nvidia-smi
+```
+
+<h2>Docker Image<h2>
+pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
