@@ -52,5 +52,8 @@ python main.py
 watch -n0.1 nvidia-smi
 ```
 
-<h2>Docker Image<h2>
+<h2>Docker Image</h2>
+
+```
 pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+```
