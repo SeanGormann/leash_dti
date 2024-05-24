@@ -45,7 +45,7 @@ class FocalLoss(nn.Module):
 from sklearn.metrics import average_precision_score
 import numpy as np
 
-def calculate_individual_map(y_true, y_scores):
+def calculate_individual_map(y_scores, y_true):
     """
     Calculate the mean average precision (MAP) for each protein individually and return their average.
 
