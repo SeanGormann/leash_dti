@@ -66,6 +66,33 @@ class GraphDataset(Dataset):
         
         return bb1, bb2, bb3, ys
 
+class GraphDataset(Dataset):
+    def __init__(self, flat_bbs, graph_dict, ys):
+        self.flat_bbs = flat_bbs
+        self.graph_dict = graph_dict
+        self.ys = ys
+
+        # Count positive y values for brd4, hsa, and seh
+        brd4_positive_count = np.sum(self.ys[:, 0] > 0)
+        hsa_positive_count = np.sum(self.ys[:, 1] > 0)
+        seh_positive_count = np.sum(self.ys[:, 2] > 0)
+        
+        print(f"Positive counts - brd4: {brd4_positive_count}, hsa: {hsa_positive_count}, seh: {seh_positive_count}")
+
+    def __len__(self):
+        return len(self.flat_bbs) // 3
+
+    def __getitem__(self, idx):
+        start_idx = idx * 3
+        bb1 = self.graph_dict[self.flat_bbs[start_idx]]
+        bb2 = self.graph_dict[self.flat_bbs[start_idx + 1]]
+        bb3 = self.graph_dict[self.flat_bbs[start_idx + 2]]
+        ys = self.ys[idx]
+        
+        return bb1, bb2, bb3, ys
+
+
+
 class MolGNN2(torch.nn.Module):
     def __init__(self, num_node_features, num_layers=6, hidden_dim=96, bb_dims=(180, 180, 180)):
         super(MolGNN2, self).__init__()
@@ -152,11 +179,12 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 
     return outputs.detach(), y_vals.detach(), loss.item()
 
-def train_model(model, dataloader, test_dataloader, num_epochs, targets, scaler, optimizer, criterion):
+def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
     print(f"DataParallel is using devices: {model.device_ids}")
     best_map = 0.0
     for epoch in range(num_epochs):
+        dataloader.sampler.set_epoch(epoch)
         model.train()
         epoch_loss = 0
         total_loss = 0
@@ -172,7 +200,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, targets, scaler,
                 pbar.set_postfix(loss=epoch_loss / (pbar.n + 1))
                 pbar.update()
 
-                if pbar.n % 2000 == 0 and pbar.n != 0:
+                if pbar.n % 200 == 0 and pbar.n != 0:
                     map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
                     true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(train_outputs, train_targets)
                     print(f"Epoch {epoch} - Partial Training Average MAP: {average_map:.4f}")
@@ -180,6 +208,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, targets, scaler,
                     print(f"HSA - True Positives: {true_positives_hsa} - Predicted Positives: {predicted_positives_hsa} - MAP: {map_hsa:.4f}")
                     print(f"SEH - True Positives: {true_positives_seh} - Predicted Positives: {predicted_positives_seh} - MAP: {map_seh:.4f}")
 
+        # Evaluate on test data after each epoch
         # Evaluate on test data after each epoch
         with torch.no_grad():
             model.eval()
@@ -191,17 +220,19 @@ def train_model(model, dataloader, test_dataloader, num_epochs, targets, scaler,
 
                 val_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
                 val_targets.append(labs.cpu().numpy())
-
+            
+            val_outputs = np.vstack(val_outputs)
+            val_targets = np.vstack(val_targets)
         map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
-        true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(val_outputs, val_targets, targets)
+        true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(val_outputs, val_targets)
         print(f"Epoch {epoch} - Validation Average MAP: {average_map:.4f}")
         print(f"BRD4 - True Positives: {true_positives_brd4} - Predicted Positives: {predicted_positives_brd4} - MAP: {map_brd4:.4f}")
         print(f"HSA - True Positives: {true_positives_hsa} - Predicted Positives: {predicted_positives_hsa} - MAP: {map_hsa:.4f}")
         print(f"SEH - True Positives: {true_positives_seh} - Predicted Positives: {predicted_positives_seh} - MAP: {map_seh:.4f}")
         print(f"Train loss: {total_loss:.4f} - Validation loss: {val_loss:.4f}")
-        
-        if map_micro > average_map:
-            best_map = map_micro
+
+        if average_map > best_map:
+            best_map = average_map
             model_dir = "models"
             os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
             model_path = os.path.join(model_dir, f"model_epoch_{epoch+1}.pth")
@@ -248,7 +279,8 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
+#def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
+def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
@@ -259,23 +291,78 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_tar
     scaler = GradScaler()
     optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     
-    dataset = GraphDataset(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, train=True, seed=2023, blind=True)
+    """dataset = GraphDataset(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, train=True, seed=2023, blind=True)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
     dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
     
     print(f"Starting training on rank {rank}")
-    train_model(model, dataloader, dataloader, num_epochs, loaded_targets, scaler, optimizer, criterion) #second dataloader should be  validation
+    train_model(model, dataloader, dataloader, num_epochs, loaded_targets, scaler, optimizer, criterion) #second dataloader should be  validation"""
+
+    train_dataset = GraphDataset(train_data['flat_bbs'], train_data['graph_dict'], train_data['ys'])
+    val_dataset = GraphDataset(val_data['flat_bbs'], val_data['graph_dict'], val_data['ys'])
+    
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
+    
+    print(f"Starting training on rank {rank}")
+    train_model(model, train_loader, val_loader, num_epochs, scaler, optimizer, criterion)
     
     cleanup()
 
-def spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
-    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict))
+
+def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False):
+    if testing:
+        # If test, return only a 50th of the data
+        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
+        indices = np.arange(subset_size)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        
+        def select_data(idx):
+            selected_flat_bbs = []
+            selected_ys = []
+            for i in idx:
+                start_idx = i * 3
+                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+                selected_ys.append(ys[i])
+            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
+        
+        subset_indices = indices[:subset_size]
+        test_data = select_data(subset_indices)
+        return test_data, test_data  # Returning the same subset for train and val for simplicity
+
+    else:
+        # Perform K-Fold Splitting
+        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
+        indices = np.arange(len(flat_bbs) // 3)
+        folds = list(kf.split(indices))
+        train_idx, val_idx = folds[fold]
+        
+        def select_data(idx):
+            selected_flat_bbs = []
+            selected_ys = []
+            for i in idx:
+                start_idx = i * 3
+                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+                selected_ys.append(ys[i])
+            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
+        
+        train_data = select_data(train_idx)
+        val_data = select_data(val_idx)
+        
+        return train_data, val_data
+
+def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
+    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
 
 if __name__ == '__main__':
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPUs")
     num_epochs = 10
-    initial_lr = 0.0001
+    initial_lr = 0.001
     batch_size = 2048
     
     # Load your dataset
@@ -288,7 +375,11 @@ if __name__ == '__main__':
     
     # Flatten the loaded_buildingblock_ids for batching
     flat_bbs = loaded_buildingblock_ids.flatten()
+
+    print("Getting data slits...")
+    train_data, val_data = pre_split_data(flat_bbs, graph_dict, loaded_targets, testing=False)
     
-    spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict)
+    #spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict)
+    spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data)
 
 
