@@ -13,6 +13,15 @@ chmod +x ./setup.sh
 
 <h2>Datasets </h2>
 
+<h3>All DTI's - tran.reduced.parquet </h3>
+
+```
+wget 'https://storage.googleapis.com/kaggle-data-sets/4784530/8490074/compressed/train.reduced.parquet.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20240527%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20240527T090846Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=0de170910f0e58b930f3fa4864624645ec152635b2dd7a5da23effb3669864003bf7544070f7b146907430c45b9cc6259b25fbddab742dbb73751c197bc4f32d85528d194aa0e36fd58416ba2c6277d4940b32abf778c64385967ccb48b23cf12462494282eaf3032f5132d2405d075b8af914f0da1c1ace259c8e4cbe6c22fb704fc0412f6340d3e0ee97fcc3047aa3e91acf27cf3a080591777802aa813a9869527c2197d017f4a4278dbdfdd70fe12bcb52b1f7ae1b32d25c57c0adf6b7ce8738de1fd04b3cb07faff0f83eb5a9f9249f82710c494e9368cae23b7bd60f320a79763d812e9d3524a55c136ff59fe22f159aee0263ae76c9da87fdd1c0b4ae' --no-check-certificate -O all_data.zip
+cd data
+unzip all_data.zip
+cd ..
+```
+
 <h3>5 Million</h3>
 
 ```
