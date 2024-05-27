@@ -23,48 +23,8 @@ from torch.utils.data.distributed import DistributedSampler
 
 from utils import *
 
-class GraphDataset(Dataset):
-    def __init__(self, flat_bbs, graph_dict, ys, fold=0, nfolds=5, train=True, seed=2023, blind=False):
-        self.flat_bbs = flat_bbs
-        self.graph_dict = graph_dict
-        self.ys = ys
-        
-        # K-Fold Splitting
-        if blind:
-            self.flat_bbs = flat_bbs
-            self.ys = ys
-        else:
-            kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
-            indices = np.arange(len(self.flat_bbs) // 3)
-            folds = list(kf.split(indices))
-            train_idx, val_idx = folds[fold]
-            
-            if train:
-                selected_idx = train_idx
-            else:
-                selected_idx = val_idx
-    
-            selected_flat_bbs = []
-            selected_ys = []
-            for idx in selected_idx:
-                start_idx = idx * 3
-                selected_flat_bbs.extend(self.flat_bbs[start_idx:start_idx + 3])
-                selected_ys.append(self.ys[idx])
-    
-            self.flat_bbs = np.array(selected_flat_bbs)
-            self.ys = np.array(selected_ys)
 
-    def __len__(self):
-        return len(self.flat_bbs) // 3
 
-    def __getitem__(self, idx):
-        start_idx = idx * 3
-        bb1 = self.graph_dict[self.flat_bbs[start_idx]]
-        bb2 = self.graph_dict[self.flat_bbs[start_idx + 1]]
-        bb3 = self.graph_dict[self.flat_bbs[start_idx + 2]]
-        ys = self.ys[idx]
-        
-        return bb1, bb2, bb3, ys
 
 class GraphDataset(Dataset):
     def __init__(self, flat_bbs, graph_dict, ys):
@@ -182,7 +142,9 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
     print(f"DataParallel is using devices: {model.device_ids}")
-    best_map = 0.0
+    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs - 1, eta_min=0)
+    lr = optimizer.param_groups[0]['lr']
+    best_map, average_map = 0.0, 0.0
     for epoch in range(num_epochs):
         dataloader.sampler.set_epoch(epoch)
         model.train()
@@ -198,17 +160,19 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
                 train_targets.append(labs.cpu().numpy())
 
                 pbar.set_postfix(loss=epoch_loss / (pbar.n + 1))
-                pbar.update()
 
-                if pbar.n % 200 == 0 and pbar.n != 0:
+                if pbar.n % 4000 == 0 and pbar.n != 0:
                     map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
                     true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(train_outputs, train_targets)
                     print(f"Epoch {epoch} - Partial Training Average MAP: {average_map:.4f}")
                     print(f"BRD4 - True Positives: {true_positives_brd4} - Predicted Positives: {predicted_positives_brd4} - MAP: {map_brd4:.4f}")
                     print(f"HSA - True Positives: {true_positives_hsa} - Predicted Positives: {predicted_positives_hsa} - MAP: {map_hsa:.4f}")
                     print(f"SEH - True Positives: {true_positives_seh} - Predicted Positives: {predicted_positives_seh} - MAP: {map_seh:.4f}")
+                
+                pbar.set_postfix(loss=f"{total_loss / (pbar.n  + 1):.4f}", lr=f"{lr:.6f}", train_map=f"{average_map:.4f}")
+                pbar.update()
 
-        # Evaluate on test data after each epoch
+        scheduler.step()
         # Evaluate on test data after each epoch
         with torch.no_grad():
             model.eval()
@@ -248,28 +212,6 @@ def custom_collate_fn(batch):
     ys_array = np.array([item[3] for item in batch])  # Convert list of numpy arrays to a single numpy array
     return Batch.from_data_list(graphs_array_1), Batch.from_data_list(graphs_array_2), Batch.from_data_list(graphs_array_3), torch.tensor(ys_array)
 
-
-"""
-def setup(rank, world_size):
-    os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12353'
-    dist.init_process_group("nccl", rank=rank, world_size=world_size)
-
-def init_process_group():
-    dist.init_process_group(backend='nccl')
-    
-def cleanup():
-    dist.destroy_process_group()
-
-def get_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--local_rank', type=int, default=0)
-    return parser.parse_args()
-
-args = get_args()
-torch.cuda.set_device(args.local_rank)
-device = torch.device(f'cuda:{args.local_rank}')
-"""
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
@@ -311,6 +253,88 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     train_model(model, train_loader, val_loader, num_epochs, scaler, optimizer, criterion)
     
     cleanup()
+
+
+
+from imblearn.over_sampling import RandomOverSampler
+import numpy as np
+from sklearn.model_selection import KFold
+
+def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False, oversample_classes=None):
+    def select_data(idx):
+        selected_flat_bbs = []
+        selected_ys = []
+        for i in idx:
+            start_idx = i * 3
+            selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+            selected_ys.append(ys[i])
+        return np.array(selected_flat_bbs), np.array(selected_ys)
+
+    def oversample(flat_bbs, ys, oversample_classes):
+        """
+        Perform oversampling on the dataset based on the specified classes.
+        oversample_classes: tuple of indices to oversample (e.g., (0, 1) to oversample brd4 and hsa).
+        """
+        ys_flat = ys.flatten()
+
+        # Identify indices to oversample
+        oversample_indices = np.any([ys[:, idx] == 1 for idx in oversample_classes], axis=0)
+
+        # Prepare data for oversampling
+        x_to_oversample = flat_bbs[oversample_indices]
+        y_to_oversample = ys[oversample_indices]
+
+        # Create the RandomOverSampler instance
+        ros = RandomOverSampler(random_state=0)
+
+        # Reshape the data to fit the oversampler requirements
+        x_to_oversample_reshaped = x_to_oversample.reshape(-1, 1)
+        y_to_oversample_reshaped = y_to_oversample.reshape(-1, 1)
+
+        # Perform the oversampling
+        x_resampled, y_resampled = ros.fit_resample(x_to_oversample_reshaped, y_to_oversample_reshaped)
+
+        # Reshape back to the original shape
+        x_resampled = x_resampled.reshape(-1, 3)
+        y_resampled = y_resampled.reshape(-1, 3)
+
+        # Append the resampled data to the original dataset
+        flat_bbs = np.concatenate([flat_bbs, x_resampled], axis=0)
+        ys = np.concatenate([ys, y_resampled], axis=0)
+
+        return flat_bbs, ys
+
+    if testing:
+        # If test, return only a 50th of the data
+        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
+        indices = np.arange(subset_size)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        
+        subset_indices = indices[:subset_size]
+        flat_bbs, ys = select_data(subset_indices)
+        test_data = {'flat_bbs': flat_bbs, 'graph_dict': graph_dict, 'ys': ys}
+        return test_data, test_data  # Returning the same subset for train and val for simplicity
+
+    else:
+        # Perform K-Fold Splitting
+        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
+        indices = np.arange(len(flat_bbs) // 3)
+        folds = list(kf.split(indices))
+        train_idx, val_idx = folds[fold]
+        
+        flat_bbs_train, ys_train = select_data(train_idx)
+        flat_bbs_val, ys_val = select_data(val_idx)
+        
+        # Perform oversampling if specified
+        if oversample_classes:
+            flat_bbs_train, ys_train = oversample(flat_bbs_train, ys_train, oversample_classes)
+
+        train_data = {'flat_bbs': flat_bbs_train, 'graph_dict': graph_dict, 'ys': ys_train}
+        val_data = {'flat_bbs': flat_bbs_val, 'graph_dict': graph_dict, 'ys': ys_val}
+        
+        return train_data, val_data
+
 
 
 def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False):
