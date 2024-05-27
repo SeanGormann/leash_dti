@@ -25,7 +25,6 @@ from utils import *
 
 
 
-
 class GraphDataset(Dataset):
     def __init__(self, flat_bbs, graph_dict, ys):
         self.flat_bbs = flat_bbs
@@ -72,7 +71,6 @@ class MolGNN2(torch.nn.Module):
 
         fc_dim = bb_dims[0] + bb_dims[1] + bb_dims[2]
         self.batch_norm = BatchNorm1d(fc_dim)
-        self.tanh = nn.Tanh()
 
         # Fully connected layers
         self.fc1 = Linear(fc_dim, fc_dim * 3)
@@ -142,7 +140,7 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
     print(f"DataParallel is using devices: {model.device_ids}")
-    scheduler = CosineAnnealingLR(optimizer, T_max=n_epochs - 1, eta_min=0)
+    scheduler = CosineAnnealingLR(optimizer, T_max=10 - 1, eta_min=0)
     lr = optimizer.param_groups[0]['lr']
     best_map, average_map = 0.0, 0.0
     for epoch in range(num_epochs):
