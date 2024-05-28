@@ -45,7 +45,7 @@ class FocalLoss(nn.Module):
 from sklearn.metrics import average_precision_score
 import numpy as np
 
-def calculate_individual_map(y_true, y_scores):
+def calculate_individual_map(y_scores, y_true):
     """
     Calculate the mean average precision (MAP) for each protein individually and return their average.
 
@@ -64,11 +64,6 @@ def calculate_individual_map(y_true, y_scores):
     #print(f"y_true shape: {y_true.shape}, dtype: {y_true.dtype}")
     #print(f"y_scores shape: {y_scores.shape}, dtype: {y_scores.dtype}")
 
-    # Convert continuous predictions to binary labels
-    y_pred_binarized = (y_scores > 0.5).astype(int)
-
-    #print(f"y_pred_binarized shape: {y_pred_binarized.shape}, dtype: {y_pred_binarized.dtype}")
-    #print(f"y_true: {y_true[:, 0]}, scores { y_scores[:, 0]} ")
 
     # Calculate MAP for each column (protein)
     map_brd4 = average_precision_score(y_true[:, 0], y_scores[:, 0])
