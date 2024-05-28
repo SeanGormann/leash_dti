@@ -52,6 +52,72 @@ class GraphDataset(Dataset):
 
 
 
+class MolGNN(torch.nn.Module):
+    def __init__(self, num_node_features, num_layers=6, hidden_dim=96, bb_dims=(180, 180, 180)):
+        super(MolGNN, self).__init__()
+
+        # Parameters
+        self.num_layers = num_layers
+        self.hidden_dim = hidden_dim
+
+        # Define GatedGraphConv for each graph component
+        self.gated_conv1 = GatedGraphConv(out_channels=bb_dims[0], num_layers=num_layers)
+        self.gated_conv2 = GatedGraphConv(out_channels=bb_dims[1], num_layers=num_layers)
+        self.gated_conv3 = GatedGraphConv(out_channels=bb_dims[2], num_layers=num_layers)
+
+        self.gated_conv12 = GatedGraphConv(out_channels=bb_dims[0]*2, num_layers=num_layers)
+        self.gated_conv22 = GatedGraphConv(out_channels=bb_dims[1]*2, num_layers=num_layers)
+        self.gated_conv32 = GatedGraphConv(out_channels=bb_dims[2]*2, num_layers=num_layers)
+
+        self.gated_conv13 = GatedGraphConv(out_channels=bb_dims[0]*4, num_layers=num_layers)
+        self.gated_conv23 = GatedGraphConv(out_channels=bb_dims[1]*4, num_layers=num_layers)
+        self.gated_conv33 = GatedGraphConv(out_channels=bb_dims[2]*4, num_layers=num_layers)
+
+        # Dropout and batch norm after pooling
+        self.dropout = Dropout(0.1)
+        self.graph_dropout = Dropout(0.1)
+
+        fc_dim = (bb_dims[0] + bb_dims[1] + bb_dims[2])*4
+        self.batch_norm = BatchNorm1d(fc_dim)
+
+        # Fully connected layers
+        self.fc1 = Linear(fc_dim, fc_dim * 3)
+        self.fc2 = Linear(fc_dim * 3, fc_dim * 3)
+        self.fc25 = Linear(fc_dim * 3, fc_dim)
+        self.fc3 = Linear(fc_dim, 3)  # Output layer
+
+    def forward(self, batch_data):
+        # Debugging: Print the device of the input batch_data
+        #print(f"batch_data device: {batch_data[0].x.device}")
+
+        x1, edge_index1, batch1 = batch_data[0].x, batch_data[0].edge_index, batch_data[0].batch
+        x2, edge_index2, batch2 = batch_data[1].x, batch_data[1].edge_index, batch_data[1].batch
+        x3, edge_index3, batch3 = batch_data[2].x, batch_data[2].edge_index, batch_data[2].batch
+
+        x1 = self.process_graph_component(x1, edge_index1, batch1, self.gated_conv1, self.gated_conv12, self.gated_conv13)
+        x2 = self.process_graph_component(x2, edge_index2, batch2, self.gated_conv2, self.gated_conv22, self.gated_conv23)
+        x3 = self.process_graph_component(x3, edge_index3, batch3, self.gated_conv3, self.gated_conv32, self.gated_conv33)
+
+        x = torch.cat((x1, x2, x3), dim=1)
+        x = self.batch_norm(x)
+
+        # Apply dropout and fully connected layers
+        x = self.dropout(F.relu(self.fc1(x)))
+        x = self.dropout(F.relu(self.fc2(x)))
+        x = self.dropout(F.relu(self.fc25(x)))
+        x = self.fc3(x)
+
+        return x
+
+    def process_graph_component(self, x, edge_index, batch, conv_layer, conv_layer2, conv_layer3):
+        x = F.relu(conv_layer(x, edge_index))
+        x = self.graph_dropout(x)
+        x = F.relu(conv_layer2(x, edge_index))
+        x = self.graph_dropout(x)
+        x = F.relu(conv_layer3(x, edge_index))
+        x = global_mean_pool(x, batch)
+        return x
+
 class MolGNN2(torch.nn.Module):
     def __init__(self, num_node_features, num_layers=6, hidden_dim=96, bb_dims=(180, 180, 180)):
         super(MolGNN2, self).__init__()
@@ -141,7 +207,6 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
     # Print the device IDs used by DataParallel
     print(f"DataParallel is using devices: {model.device_ids}")
     scheduler = CosineAnnealingLR(optimizer, T_max=10 - 1, eta_min=0)
-    lr = optimizer.param_groups[0]['lr']
     best_map, average_map = 0.0, 0.0
     for epoch in range(num_epochs):
         dataloader.sampler.set_epoch(epoch)
@@ -149,6 +214,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
         epoch_loss = 0
         total_loss = 0
         train_outputs, train_targets = [], []
+        lr = optimizer.param_groups[0]['lr']
         with tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
             for data in dataloader:
                 outs, labs, loss = process_batch(data, model, scaler, optimizer, criterion, train=True, protein_index=None)
@@ -156,8 +222,6 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
 
                 train_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
                 train_targets.append(labs.cpu().numpy())
-
-                pbar.set_postfix(loss=epoch_loss / (pbar.n + 1))
 
                 if pbar.n % 4000 == 0 and pbar.n != 0:
                     map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
@@ -197,7 +261,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
             best_map = average_map
             model_dir = "models"
             os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
-            model_path = os.path.join(model_dir, f"model_epoch_{epoch+1}.pth")
+            model_path = os.path.join(model_dir, f"multi_model_8gpu_1.pth")
             torch.save(model.module.state_dict(), model_path)
 
     cleanup()
@@ -224,12 +288,14 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
-    model = MolGNN2(8, 4, 96, bb_dims=(320, 320, 320)).to(device)
+    model = MolGNN2(8, 4, 96, bb_dims=(96, 96, 96)).to(device)
+    #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
     model = DDP(model, device_ids=[rank])
     
     criterion = nn.BCEWithLogitsLoss().to(device)
     scaler = GradScaler()
-    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+    #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
     
     """dataset = GraphDataset(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, train=True, seed=2023, blind=True)
     sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
