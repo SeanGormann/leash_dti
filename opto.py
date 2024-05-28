@@ -22,7 +22,7 @@ import torch.multiprocessing as mp
 from torch.utils.data.distributed import DistributedSampler
 
 from utils import *
-
+from models import *
 
 
 class GraphDataset(Dataset):
@@ -50,128 +50,6 @@ class GraphDataset(Dataset):
         
         return bb1, bb2, bb3, ys
 
-
-
-class MolGNN(torch.nn.Module):
-    def __init__(self, num_node_features, num_layers=6, hidden_dim=96, bb_dims=(180, 180, 180)):
-        super(MolGNN, self).__init__()
-
-        # Parameters
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-
-        # Define GatedGraphConv for each graph component
-        self.gated_conv1 = GatedGraphConv(out_channels=bb_dims[0], num_layers=num_layers)
-        self.gated_conv2 = GatedGraphConv(out_channels=bb_dims[1], num_layers=num_layers)
-        self.gated_conv3 = GatedGraphConv(out_channels=bb_dims[2], num_layers=num_layers)
-
-        self.gated_conv12 = GatedGraphConv(out_channels=bb_dims[0]*2, num_layers=num_layers)
-        self.gated_conv22 = GatedGraphConv(out_channels=bb_dims[1]*2, num_layers=num_layers)
-        self.gated_conv32 = GatedGraphConv(out_channels=bb_dims[2]*2, num_layers=num_layers)
-
-        self.gated_conv13 = GatedGraphConv(out_channels=bb_dims[0]*4, num_layers=num_layers)
-        self.gated_conv23 = GatedGraphConv(out_channels=bb_dims[1]*4, num_layers=num_layers)
-        self.gated_conv33 = GatedGraphConv(out_channels=bb_dims[2]*4, num_layers=num_layers)
-
-        # Dropout and batch norm after pooling
-        self.dropout = Dropout(0.1)
-        self.graph_dropout = Dropout(0.1)
-
-        fc_dim = (bb_dims[0] + bb_dims[1] + bb_dims[2])*4
-        self.batch_norm = BatchNorm1d(fc_dim)
-
-        # Fully connected layers
-        self.fc1 = Linear(fc_dim, fc_dim * 3)
-        self.fc2 = Linear(fc_dim * 3, fc_dim * 3)
-        self.fc25 = Linear(fc_dim * 3, fc_dim)
-        self.fc3 = Linear(fc_dim, 3)  # Output layer
-
-    def forward(self, batch_data):
-        # Debugging: Print the device of the input batch_data
-        #print(f"batch_data device: {batch_data[0].x.device}")
-
-        x1, edge_index1, batch1 = batch_data[0].x, batch_data[0].edge_index, batch_data[0].batch
-        x2, edge_index2, batch2 = batch_data[1].x, batch_data[1].edge_index, batch_data[1].batch
-        x3, edge_index3, batch3 = batch_data[2].x, batch_data[2].edge_index, batch_data[2].batch
-
-        x1 = self.process_graph_component(x1, edge_index1, batch1, self.gated_conv1, self.gated_conv12, self.gated_conv13)
-        x2 = self.process_graph_component(x2, edge_index2, batch2, self.gated_conv2, self.gated_conv22, self.gated_conv23)
-        x3 = self.process_graph_component(x3, edge_index3, batch3, self.gated_conv3, self.gated_conv32, self.gated_conv33)
-
-        x = torch.cat((x1, x2, x3), dim=1)
-        x = self.batch_norm(x)
-
-        # Apply dropout and fully connected layers
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-        x = self.dropout(F.relu(self.fc25(x)))
-        x = self.fc3(x)
-
-        return x
-
-    def process_graph_component(self, x, edge_index, batch, conv_layer, conv_layer2, conv_layer3):
-        x = F.relu(conv_layer(x, edge_index))
-        x = self.graph_dropout(x)
-        x = F.relu(conv_layer2(x, edge_index))
-        x = self.graph_dropout(x)
-        x = F.relu(conv_layer3(x, edge_index))
-        x = global_mean_pool(x, batch)
-        return x
-
-class MolGNN2(torch.nn.Module):
-    def __init__(self, num_node_features, num_layers=6, hidden_dim=96, bb_dims=(180, 180, 180)):
-        super(MolGNN2, self).__init__()
-
-        # Parameters
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-
-        # Define GatedGraphConv for each graph component
-        self.gated_conv1 = GatedGraphConv(out_channels=bb_dims[0], num_layers=num_layers)
-        self.gated_conv2 = GatedGraphConv(out_channels=bb_dims[1], num_layers=num_layers)
-        self.gated_conv3 = GatedGraphConv(out_channels=bb_dims[2], num_layers=num_layers)
-
-        # Dropout and batch norm after pooling
-        self.dropout = Dropout(0.1)
-        self.graph_dropout = Dropout(0.1)
-
-        fc_dim = bb_dims[0] + bb_dims[1] + bb_dims[2]
-        self.batch_norm = BatchNorm1d(fc_dim)
-
-        # Fully connected layers
-        self.fc1 = Linear(fc_dim, fc_dim * 3)
-        self.fc2 = Linear(fc_dim * 3, fc_dim * 3)
-        self.fc25 = Linear(fc_dim * 3, fc_dim)
-        self.fc3 = Linear(fc_dim, 3)  # Output layer
-
-    def forward(self, batch_data):
-        # Debugging: Print the device of the input batch_data
-        #print(f"batch_data device: {batch_data[0].x.device}")
-
-        x1, edge_index1, batch1 = batch_data[0].x, batch_data[0].edge_index, batch_data[0].batch
-        x2, edge_index2, batch2 = batch_data[1].x, batch_data[1].edge_index, batch_data[1].batch
-        x3, edge_index3, batch3 = batch_data[2].x, batch_data[2].edge_index, batch_data[2].batch
-
-        x1 = self.process_graph_component(x1, edge_index1, batch1, self.gated_conv1)
-        x2 = self.process_graph_component(x2, edge_index2, batch2, self.gated_conv2)
-        x3 = self.process_graph_component(x3, edge_index3, batch3, self.gated_conv3)
-
-        x = torch.cat((x1, x2, x3), dim=1)
-        x = self.batch_norm(x)
-
-        # Apply dropout and fully connected layers
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-        x = self.dropout(F.relu(self.fc25(x)))
-        x = self.fc3(x)
-
-        return x
-
-    def process_graph_component(self, x, edge_index, batch, conv_layer):
-        x = F.relu(conv_layer(x, edge_index))
-        x = self.graph_dropout(x)
-        x = global_mean_pool(x, batch)
-        return x
 
 def process_batch(batch, model, scaler, optimizer, criterion, train=True, protein_index=None):
     # Move batch to the appropriate device
@@ -288,7 +166,7 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
-    model = MolGNN2(8, 4, 96, bb_dims=(96, 96, 96)).to(device)
+    model = MolGNN2(8, 4, 96, bb_dims=(48, 48, 48)).to(device)
     #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
     model = DDP(model, device_ids=[rank])
     
@@ -446,6 +324,7 @@ def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testin
 def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
     mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
 
+
 if __name__ == '__main__':
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPUs")
@@ -465,7 +344,7 @@ if __name__ == '__main__':
     flat_bbs = loaded_buildingblock_ids.flatten()
 
     print("Getting data slits...")
-    train_data, val_data = pre_split_data(flat_bbs, graph_dict, loaded_targets, testing=False)
+    train_data, val_data = pre_split_data(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, testing=False)
     
     #spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict)
     spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data)
