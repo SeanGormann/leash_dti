@@ -73,19 +73,20 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 
         loss = criterion(outputs, y_vals)
 
-    if train:
+    """if train:
         optimizer.zero_grad()
         scaler.scale(loss).backward()
         scaler.step(optimizer)
-        scaler.update()
+        scaler.update()"""
 
-    return outputs.detach(), y_vals.detach(), loss.item()
+    return outputs.detach(), y_vals.detach(), loss #.item()
 
 def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
     print(f"DataParallel is using devices: {model.device_ids}")
     scheduler = CosineAnnealingLR(optimizer, T_max=10 - 1, eta_min=0)
     best_map, average_map = 0.0, 0.0
+    accumulation_steps = 4
     for epoch in range(num_epochs):
         dataloader.sampler.set_epoch(epoch)
         model.train()
@@ -96,7 +97,17 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
         with tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
             for data in dataloader:
                 outs, labs, loss = process_batch(data, model, scaler, optimizer, criterion, train=True, protein_index=None)
-                total_loss += loss
+                
+                # Normalize loss to account for gradient accumulation
+                loss = loss / accumulation_steps
+                scaler.scale(loss).backward()
+        
+                if (pbar.n + 1) % accumulation_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+        
+                total_loss += loss.item() * accumulation_steps  
 
                 train_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
                 train_targets.append(labs.cpu().numpy())
@@ -112,7 +123,13 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
                 pbar.set_postfix(loss=f"{total_loss / (pbar.n  + 1):.4f}", lr=f"{lr:.6f}", train_map=f"{average_map:.4f}")
                 pbar.update()
 
+        if len(dataloader) % accumulation_steps != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
+    
         scheduler.step()
+
         # Evaluate on test data after each epoch
         with torch.no_grad():
             model.eval()
@@ -139,7 +156,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
             best_map = average_map
             model_dir = "models"
             os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
-            model_path = os.path.join(model_dir, f"multi_model_8gpu_1.pth")
+            model_path = os.path.join(model_dir, f"multi_model_8gpu_gt1.pth")
             torch.save(model.module.state_dict(), model_path)
 
     cleanup()
@@ -166,21 +183,16 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
-    model = MolGNN2(8, 4, 96, bb_dims=(48, 48, 48)).to(device)
+    #model = MolGNN2(8, 4, 96, bb_dims=(48, 48, 48)).to(device)
     #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
+    #model = GraphTransformer(node_emb=64, edge_emb=64, out_dims=64, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
+    model = GraphTransformerV2(node_emb=96, edge_emb=96, out_dims=96, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
     model = DDP(model, device_ids=[rank])
     
     criterion = nn.BCEWithLogitsLoss().to(device)
     scaler = GradScaler()
     #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
-    
-    """dataset = GraphDataset(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, train=True, seed=2023, blind=True)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
-    
-    print(f"Starting training on rank {rank}")
-    train_model(model, dataloader, dataloader, num_epochs, loaded_targets, scaler, optimizer, criterion) #second dataloader should be  validation"""
 
     train_dataset = GraphDataset(train_data['flat_bbs'], train_data['graph_dict'], train_data['ys'])
     val_dataset = GraphDataset(val_data['flat_bbs'], val_data['graph_dict'], val_data['ys'])
@@ -329,15 +341,15 @@ if __name__ == '__main__':
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPUs")
     num_epochs = 10
-    initial_lr = 0.001
-    batch_size = 2048
+    initial_lr = 0.0008
+    batch_size = 256
     
     # Load your dataset
-    loaded_data = np.load('data/dataset.npz')
-    loaded_buildingblock_ids, loaded_targets = loaded_data['buildingblock_ids'], loaded_data['targets']
+    loaded_data = np.load('data/10m_data.npz')
+    loaded_buildingblock_ids, loaded_targets = loaded_data['buildingblocks'], loaded_data['targets']
     print(f'Loaded buildingblock_ids shape: {loaded_buildingblock_ids.shape}')
     
-    graphs = pd.read_pickle('data/all_buildingblock.pkl')
+    graphs = pd.read_pickle('data/bbs_edge_and_eigens.pkl')
     graph_dict = {row['id']: row['mol_graph'] for _, row in graphs.iterrows()}
     
     # Flatten the loaded_buildingblock_ids for batching
