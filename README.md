@@ -49,6 +49,17 @@ unzip graph_data_30milly.zip
 cd ..
 ```
 
+<h3> Selfies Data - Encoded strings</h3>
+
+```
+cd data
+wget 'https://storage.googleapis.com/kagglesdsdata/datasets/5147947/8603651/encoded_selfies_train.npz?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20240604%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20240604T121634Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=784218e9680471e8a823f5e0f3f52ce90b500d83e538dd8e83ce3a76db7e46e44457c57c1ccacd4789fa0ad72fc22649af61bb6e5ea181acbc1eada800398f9f638361f28ce4fa0650618b5c8a61ef3eb40010ae7bb84386ad2887066e0f83fd2a057216b4da4efdb08fda02d30aa244bc888bda6e954e32dbb905455f64785e662ae2af012e938e715be73306c71e8881d06af3004d48a617c9668334a7c7cb2c9d5a74c15dab82f41af7b5b8c35e23720496e0e01cb1be6612207417112f303c4586ad00ec8ffcf13ac9df4869de966268945f93924326ba4672ddbd8afe45707e01f7c53a7160d0b9884c66b0fa8c96d6c892f28eb1df29f8015f0de8a243' --no-check-certificate -O selfies_data.npz #.zip
+cd ..
+```
+
+
+
+
 <h2>learning </h2>
 
 ```
