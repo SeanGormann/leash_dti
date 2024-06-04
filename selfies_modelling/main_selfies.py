@@ -82,6 +82,23 @@ def prepare_kfold_splits(num_files, k=30):
 
 
 
+
+def custom_collate(batch):
+    # Unzip the batch
+    inputs, labels = zip(*batch)
+    
+    # Convert inputs to a stacked numpy array before converting to tensor
+    inputs_np = np.array(inputs)
+    labels_np = np.array(labels)
+
+    # Convert numpy arrays to tensors
+    inputs_tensor = torch.from_numpy(inputs_np).to(torch.long)
+    labels_tensor = torch.from_numpy(labels_np).to(torch.float)
+
+    return inputs_tensor, labels_tensor
+
+
+"""
 def custom_collate(batch):
     inputs = batch[0]
     labels = batch[1]
@@ -95,7 +112,7 @@ def custom_collate(batch):
     print(f"Input Tensor Type in collate: {inputs_tensor.dtype}")  # This should print torch.int64 or torch.long
 
     return inputs_tensor, labels_tensor
-
+"""
 
 
 
@@ -115,7 +132,7 @@ def pre_split_data(tokens, ys, fold=0, nfolds=5, seed=2023, testing=False):
     tuple: Two tuples containing the training and validation data respectively.
     """
     if testing:
-        subset_size = len(tokens) // 150  # Adjust as necessary for smaller test subset
+        subset_size = len(tokens) // 4 # // 150  # Adjust as necessary for smaller test subset
         indices = np.arange(subset_size)
         np.random.seed(seed)
         np.random.shuffle(indices)
@@ -136,16 +153,19 @@ def pre_split_data(tokens, ys, fold=0, nfolds=5, seed=2023, testing=False):
 def process_batch(batch, model, scaler, optimizer, criterion, train=True, protein_index=None):
     # Move batch to the appropriate device
     device = next(model.parameters()).device
-    batch = [item.to(device) for item in batch]
+    #batch = [item.to(device) for item in batch]
+    inputs, labels = batch
+    inputs = inputs.to(model.device)
+    labels = labels.to(model.device)
 
     with autocast():
-        outputs = model(batch)
+        outputs = model(inputs)
 
         # Adjust reshaping based on your batch data structure and need
         if protein_index is not None:
-            y_vals = batch[3].view(-1, 3)[:, protein_index].view(-1, 1)  # Select the correct targets and reshape
+            y_vals = labels.view(-1, 3)[:, protein_index].view(-1, 1)  # Select the correct targets and reshape
         else:
-            y_vals = batch[3].view(-1, 3)
+            y_vals = labels.view(-1, 3)
 
         y_vals = y_vals.float().to(outputs.device)  # Match the device of the model outputs
 
@@ -382,7 +402,6 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
 
 
 
-
 def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
     mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
 
@@ -392,13 +411,13 @@ if __name__ == '__main__':
 
     # Load your dataset
     #loaded_data = np.load('../leash_dti/data/dataset.npz')
-    loaded_data = np.load('encoded_selfies_train.npz')
+    loaded_data = np.load('../data/selfies_data.npz')
 
     loaded_tokens, loaded_targets = loaded_data['tokens'], loaded_data['binds']
     print(f'Loaded buildingblock_ids shape: {loaded_tokens.shape}')
 
     print("Getting data splits...")
-    train_data, val_data = pre_split_data(loaded_tokens, loaded_targets, fold=0, nfolds=5, testing=True)
+    train_data, val_data = pre_split_data(loaded_tokens, loaded_targets, fold=0, nfolds=10, testing=True)
 
 
     num_epochs = 10
