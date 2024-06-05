@@ -16,6 +16,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.nn import Linear, ReLU, Sequential, Dropout, BatchNorm1d
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.cuda.amp import GradScaler, autocast
+from torch.utils.data import Subset
 
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -42,6 +43,9 @@ class MoleculeDataset(Dataset):
         """
         self.inputs = inputs
         self.labels = labels
+
+        self.inputs = np.memmap(inputs, dtype=np.uint8, mode='r', shape=(98415610, 130))
+        self.labels = np.memmap(labels, dtype=np.uint8, mode='r', shape=(98415610, 3))
 
         print(f"Total samples loaded: {len(self.inputs)}")
 
@@ -361,7 +365,7 @@ def cleanup():
     dist.destroy_process_group()
 
 #def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
-def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
+def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path):
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
@@ -379,19 +383,27 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
     
-    """dataset = GraphDataset(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, train=True, seed=2023, blind=True)
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank)
-    dataloader = DataLoader(dataset, batch_size=batch_size, sampler=sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
-    
-    print(f"Starting training on rank {rank}")
-    train_model(model, dataloader, dataloader, num_epochs, loaded_targets, scaler, optimizer, criterion) #second dataloader should be  validation"""
 
-    train_dataset = MoleculeDataset(train_data[0], train_data[1])
-    val_dataset = MoleculeDataset(val_data[0], val_data[1])
-    
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
-    
+    # Load the entire dataset via memmap (only file paths are passed, not the data itself)
+    full_dataset = MoleculeDataset(tokens_path, targets_path)
+
+    nfolds, fold = 10, 0
+
+    # Create indices for KFold
+    num_samples = len(full_dataset)
+    indices = np.arange(num_samples)
+    kf = KFold(n_splits=nfolds, shuffle=True, random_state=42)
+    train_idx, val_idx = list(kf.split(indices))[rank % nfolds]  # Use rank to select fold
+
+    # Subset the full dataset based on indices
+    train_dataset = Subset(full_dataset, train_idx)
+    val_dataset = Subset(full_dataset, val_idx)
+
+    # Create samplers for distributing data across the GPUs
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+
+    # Data loaders
     train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate)
     val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate)
     
@@ -402,8 +414,8 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
 
 
 
-def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
-    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
+def spawn_workers(world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path):
+    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path))
 
 
 if __name__ == '__main__':
@@ -413,15 +425,11 @@ if __name__ == '__main__':
     #loaded_data = np.load('../leash_dti/data/dataset.npz')
     loaded_data = np.load('../data/selfies_data.npz')
 
-    loaded_tokens, loaded_targets = loaded_data['tokens'], loaded_data['binds']
-    print(f'Loaded buildingblock_ids shape: {loaded_tokens.shape}')
-
-    print("Getting data splits...")
-    train_data, val_data = pre_split_data(loaded_tokens, loaded_targets, fold=0, nfolds=10, testing=True)
-
+    tokens_path, targets_path = 'tokens_memmap.dat', 'targets_memmap.dat'
+    print(f'Loaded buildingblock_ids shape: 98milly')
 
     num_epochs = 10
     initial_lr = 1e-3
     batch_size = 1024
 
-    spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data)
+    spawn_workers(world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path)
