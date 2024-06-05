@@ -29,6 +29,9 @@ from torch.utils.data.distributed import DistributedSampler
 
 from utils import *
 from models import *
+import os
+import psutil
+
 
 
 class MoleculeDataset(Dataset):
@@ -41,20 +44,22 @@ class MoleculeDataset(Dataset):
         data_dir (str): The directory containing `.npz` files with token and label data.
         filenames (list of str): List of filenames within the data_dir to be used.
         """
-        self.inputs = inputs
-        self.labels = labels
+        #self.inputs = inputs
+        #self.labels = labels
 
         self.inputs = np.memmap(inputs, dtype=np.uint8, mode='r', shape=(98415610, 130))
         self.labels = np.memmap(labels, dtype=np.uint8, mode='r', shape=(98415610, 3))
 
-        print(f"Total samples loaded: {len(self.inputs)}")
+        #print(f"Len inputs: {len(self.inputs)}")
+
+        #print(f"Total samples loaded: {len(self.inputs)}")
 
         # Count positive y values for brd4, hsa, and seh
-        brd4_positive_count = np.sum(self.labels[:, 0] > 0)
-        hsa_positive_count = np.sum(self.labels[:, 1] > 0)
-        seh_positive_count = np.sum(self.labels[:, 2] > 0)
+        #brd4_positive_count = np.sum(self.labels[:, 0] > 0)
+        #hsa_positive_count = np.sum(self.labels[:, 1] > 0)
+        #seh_positive_count = np.sum(self.labels[:, 2] > 0)
         
-        print(f"Positive counts - brd4: {brd4_positive_count}, hsa: {hsa_positive_count}, seh: {seh_positive_count}")
+        #print(f"Positive counts - brd4: {brd4_positive_count}, hsa: {hsa_positive_count}, seh: {seh_positive_count}")
 
     def __len__(self):
         return len(self.inputs)
@@ -302,6 +307,7 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
         lr = optimizer.param_groups[0]['lr']
         with tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
             for data in dataloader:
+                print(data)
                 outs, labs, loss = process_batch(data, model, scaler, optimizer, criterion, train=True, protein_index=None)
                 total_loss += loss
 
@@ -358,59 +364,52 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
 
 def setup(rank, world_size):
     os.environ['MASTER_ADDR'] = 'localhost'
-    os.environ['MASTER_PORT'] = '12355'
+    os.environ['MASTER_PORT'] = '12353'
     dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
 
 def cleanup():
     dist.destroy_process_group()
+    print("Cleaned up distributed process group.")
 
-#def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
 def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path):
     setup(rank, world_size)
     
+    print(f"Rank {rank}: Setting up device and model.")
     device = torch.device(f'cuda:{rank}')
-
-    vocab_size = 43  # Total unique tokens
-    emb_dim = 128  # Embedding dimensionality
-    seq_len = 130  # Sequence length
-    num_classes = 3  # Output classes
-    model = HyenaNet(vocab_size, emb_dim, seq_len, emb_dim, num_classes).to(device)
-
+    model = HyenaNet(43, 128, 130, 128, 3).to(device)
     model = DDP(model, device_ids=[rank])
-    
+
     criterion = nn.BCEWithLogitsLoss().to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     scaler = GradScaler()
-    #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
-    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
-    
 
-    # Load the entire dataset via memmap (only file paths are passed, not the data itself)
+    print(f"Rank {rank}: Loading dataset.")
     full_dataset = MoleculeDataset(tokens_path, targets_path)
+    print(f"Rank {rank}: Dataset loaded with {len(full_dataset)} samples.")
 
-    nfolds, fold = 10, 0
-
-    # Create indices for KFold
+    # Assuming KFold split is done outside and indices are passed or managed via a shared file or setting
     num_samples = len(full_dataset)
     indices = np.arange(num_samples)
-    kf = KFold(n_splits=nfolds, shuffle=True, random_state=42)
-    train_idx, val_idx = list(kf.split(indices))[rank % nfolds]  # Use rank to select fold
+    kf = KFold(n_splits=10, shuffle=True, random_state=42)
+    train_idx, val_idx = next(iter(kf.split(indices)))
 
-    # Subset the full dataset based on indices
     train_dataset = Subset(full_dataset, train_idx)
     val_dataset = Subset(full_dataset, val_idx)
 
-    # Create samplers for distributing data across the GPUs
-    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank, shuffle=False)
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
 
-    # Data loaders
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=2, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=2, pin_memory=True)
     
-    print(f"Starting training on rank {rank}")
+    process = psutil.Process(os.getpid())
+    print(f"Mem. Usage before train_model: {process.memory_info().rss / (1024 * 1024)} MB")
+    
+    print(f"Rank {rank}: Starting training.")
     train_model(model, train_loader, val_loader, num_epochs, scaler, optimizer, criterion)
     
     cleanup()
+
 
 
 
@@ -423,13 +422,13 @@ if __name__ == '__main__':
 
     # Load your dataset
     #loaded_data = np.load('../leash_dti/data/dataset.npz')
-    loaded_data = np.load('../data/selfies_data.npz')
+    #loaded_data = np.load('../data/selfies_data.npz')
 
-    tokens_path, targets_path = 'tokens_memmap.dat', 'targets_memmap.dat'
+    tokens_path, targets_path = '../data/tokens_memmap.dat', '../data/targets_memmap.dat'
     print(f'Loaded buildingblock_ids shape: 98milly')
 
     num_epochs = 10
     initial_lr = 1e-3
-    batch_size = 1024
+    batch_size = 256
 
     spawn_workers(world_size, num_epochs, initial_lr, batch_size, tokens_path, targets_path)
