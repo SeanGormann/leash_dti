@@ -8,4 +8,5 @@ apt-get install unzip
 cd ..
 
 echo "installing requirements"
-pip install -r requirements.txt
+#pip install -r requirements.txt
+pip install -r selfies_requirements.txt
