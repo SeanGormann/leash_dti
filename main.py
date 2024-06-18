@@ -23,7 +23,8 @@ from torch.utils.data.distributed import DistributedSampler
 
 from utils import *
 from models import *
-
+from test import *
+from test import run_test
 
 class GraphDataset(Dataset):
     def __init__(self, flat_bbs, graph_dict, ys):
@@ -83,6 +84,7 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 
 def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
+    model_filename = "attentive_fp.pth"
     print(f"DataParallel is using devices: {model.device_ids}")
     scheduler = CosineAnnealingLR(optimizer, T_max=10 - 1, eta_min=0)
     best_map, average_map = 0.0, 0.0
@@ -156,8 +158,12 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
             best_map = average_map
             model_dir = "models"
             os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
-            model_path = os.path.join(model_dir, f"multi_model_8gpu_gt1.pth")
+            model_path = os.path.join(model_dir, model_filename)
             torch.save(model.module.state_dict(), model_path)
+
+
+    run_test(model_path)
+
 
     cleanup()
 

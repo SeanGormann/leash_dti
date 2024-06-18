@@ -27,7 +27,7 @@ from models import *
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 all_dtis = '../data/test_bb.csv' #test_prot test_bb
-building_blocks = '../data/all_buildingblock.pkl' #'/content/drive/MyDrive/all_buildingblock.pkl' '/content/drive/MyDrive/all_bbs_pca_8mixfeats.pkl' 
+building_blocks = '../data/bbs_with_edgeattr.pkl' #'/content/drive/MyDrive/all_buildingblock.pkl' '/content/drive/MyDrive/all_bbs_pca_8mixfeats.pkl' 
 
 bbs = pd.read_pickle(building_blocks)
 all_dtis = pd.read_csv(all_dtis)
@@ -64,11 +64,20 @@ class TestDataset(Dataset):
         #protein_seq = self.protein_dict[self.protein_ids[idx]].to(self.device)
         protein_seq = torch.tensor([1])
         #prot = self.protein_ids[idx]
-        return {'mol_graphs': (graph1, graph2, graph3), 'protein_seq': protein_seq, 'prot': torch.tensor([1]), 'y': y}
+        #return {'mol_graphs': (graph1, graph2, graph3), 'protein_seq': protein_seq, 'prot': torch.tensor([1]), 'y': y}
+        return graph1, graph2, graph3, y
 
     def prepare_graph(self, graph):
         graph.to(self.device)
         return graph
+    
+
+def custom_collate_fn(batch):
+    graphs_array_1 = [item[0] for item in batch]
+    graphs_array_2 = [item[1] for item in batch]
+    graphs_array_3 = [item[2] for item in batch]
+    ys_array = np.array([item[3] for item in batch])  # Convert list of numpy arrays to a single numpy array
+    return Batch.from_data_list(graphs_array_1), Batch.from_data_list(graphs_array_2), Batch.from_data_list(graphs_array_3), torch.tensor(ys_array)
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ds_train = TestDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=True)
@@ -127,7 +136,7 @@ for batch in tqdm(dl_test, desc="Inference"):
     #graphs, ids = batch  # Assume the DataLoader provides both graphs and corresponding ids
     preds = predict_batch(batch)
     all_predictions.extend(preds.tolist())
-    all_ids.extend(batch['y'].tolist())
+    all_ids.extend(batch[3].tolist())
 
 print(f"Completed inference in {time.time() - start_time:.2f} seconds.")
 
@@ -172,9 +181,9 @@ final_submission.to_csv('submissions/final_predictions_v84.csv', index=False)
 
 
 
-def run_test(model):
+def run_test(model_path):
     all_dtis = '../data/test_bb.csv' #test_prot test_bb
-    building_blocks = '../data/all_buildingblock.pkl' #'/content/drive/MyDrive/all_buildingblock.pkl' '/content/drive/MyDrive/all_bbs_pca_8mixfeats.pkl' 
+    building_blocks = '../data/bbs_with_edgeattr.pkl' #'/content/drive/MyDrive/all_buildingblock.pkl' '/content/drive/MyDrive/all_bbs_pca_8mixfeats.pkl' 
 
     bbs = pd.read_pickle(building_blocks)
     all_dtis = pd.read_csv(all_dtis)
@@ -183,15 +192,33 @@ def run_test(model):
     ds_train = TestDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=True)
     dl_test = GeoDataLoader(ds_train, batch_size=2048, shuffle=True) #, collate_fn=custom_collate_fn). 192 2048
 
+    ### Load model
+    from collections import OrderedDict
+    state_dict = torch.load(model_path, map_location=device)
+    new_state_dict = OrderedDict()
+    for k, v in state_dict.items():
+        if k.startswith('module.'):
+            k = k[7:]  # Remove 'module.' prefix
+        if 'lin.weight' in k:
+            # Duplicate weight for both lin_src and lin_dst
+            new_key_src = k.replace('lin.weight', 'lin_src.weight')
+            new_key_dst = k.replace('lin.weight', 'lin_dst.weight')
+            new_state_dict[new_key_src] = v
+            new_state_dict[new_key_dst] = v
+        else:
+            new_state_dict[k] = v
+
+    model = Net().to(device)  # Make sure to initialize your model before loading the state_dict
+    model.load_state_dict(new_state_dict)
+    model.to(device)
     model.eval()
+
     all_predictions = []
     all_ids = []
-
     for batch in tqdm(dl_test, desc="Inference"):
         preds = predict_batch(batch)
         all_predictions.extend(preds.tolist())
-        all_ids.extend(batch['y'].tolist())
-
+        all_ids.extend(batch[3].tolist())
     final_predictions = []
     final_ids = []
 
