@@ -32,73 +32,13 @@ building_blocks = '../data/all_buildingblock.pkl' #'/content/drive/MyDrive/all_b
 bbs = pd.read_pickle(building_blocks)
 all_dtis = pd.read_csv(all_dtis)
 
-class MolGNN(torch.nn.Module):
-    def __init__(self, num_node_features, num_layers=6, hidden_dim=96):
-        super(MolGNN, self).__init__()
-        # Parameters
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-
-        # Define GatedGraphConv for each graph component
-        self.gated_conv1 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
-        self.gated_conv2 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
-        self.gated_conv3 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
-
-        # Dropout and batch norm after pooling
-        self.dropout = Dropout(0.1)
-        self.batch_norm = BatchNorm1d(hidden_dim * 4)  # Size multiplied by 3 because of concatenation
-
-
-        fc_dim = hidden_dim * 4
-
-        # Fully connected layers
-        self.fc1 = Linear(fc_dim, fc_dim * 3)
-        self.fc2 = Linear(fc_dim * 3, fc_dim*3)
-        self.fc25 = Linear(fc_dim * 3, fc_dim)
-        self.fc3 = Linear(fc_dim, 3)  # Output layer
-
-    def forward(self, batch_data):
-        #print("batch_data", batch_data)
-        batch_data = batch_data['mol_graphs']
-        # Process each graph component through its GatedGraphConv, pooling, and batch norm
-        x1, edge_index1, batch1 = batch_data[0].x, batch_data[0].edge_index, batch_data[0].batch
-        x2, edge_index2, batch2 = batch_data[1].x, batch_data[1].edge_index, batch_data[1].batch
-        x3, edge_index3, batch3 = batch_data[2].x, batch_data[2].edge_index, batch_data[2].batch
-
-        x1 = self.process_graph_component(x1, edge_index1, batch1, self.gated_conv1)
-        x2 = self.process_graph_component(x2, edge_index2, batch2, self.gated_conv2)
-        x3 = self.process_graph_component(x3, edge_index3, batch3, self.gated_conv3)
-
-        # Concatenate the outputs from the three graph components
-        xx = x1 * x2 * x3
-        x = torch.cat((x1, x2, x3, xx), dim=1) # xx
-        #xx = x1 * x2 * x3
-        #x = torch.einsum('ij,ij,ij->ij', x1, x2, x3)
-
-        # Apply dropout and fully connected layers
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-        x = self.dropout(F.relu(self.fc25(x)))
-        x = self.fc3(x)
-
-        return x
-
-    def process_graph_component(self, x, edge_index, batch, conv_layer):
-        x = F.relu(conv_layer(x, edge_index))
-        x = global_mean_pool(x, batch)
-        return x
-
-
-
-from sklearn.model_selection import KFold
-import torch
-from torch.utils.data import Dataset
 
 class TestDataset(Dataset):
-    def __init__(self, reaction_df, block_df, device='cpu', fold=0, nfolds=5, train=True, test=False, blind=False, seed=2023, max_len=584):
+    def __init__(self, reaction_df, block_df, protein_dict, device='cpu', fold=0, nfolds=5, train=True, test=False, blind=False, seed=2023, max_len=584):
         self.device = device
         self.reaction_df = reaction_df
         self.block_df = block_df
+        self.protein_dict = protein_dict  # Precomputed encoded protein sequences
         self.max_len = max_len
 
         # K-Fold Splitting
@@ -124,14 +64,11 @@ class TestDataset(Dataset):
         #protein_seq = self.protein_dict[self.protein_ids[idx]].to(self.device)
         protein_seq = torch.tensor([1])
         #prot = self.protein_ids[idx]
-
-        return {'mol_graphs': (graph1, graph2, graph3), 'y': y}
+        return {'mol_graphs': (graph1, graph2, graph3), 'protein_seq': protein_seq, 'prot': torch.tensor([1]), 'y': y}
 
     def prepare_graph(self, graph):
         graph.to(self.device)
         return graph
-
-
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 ds_train = TestDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=True)
@@ -142,11 +79,37 @@ print(f"Data: {next(iter(dl_test))}")
 
 #model = Cerberus(num_node_features=8, num_layers=4, hidden_dim=180, bb_dims=(96, 240, 240), prot_dim=240)
 model = MolGNN(num_node_features=8, num_layers=4, hidden_dim=180)
-multi_model_path = 'models/multi_mod_1.pth'
+multi_model_path = '../models/multi_gpu_model_afp.pth'
 
 model.load_state_dict(torch.load(multi_model_path))
 model.to(device)
 model.eval()
+
+
+
+### Multi GPU Model:
+from collections import OrderedDict
+
+state_dict = torch.load(multi_model_path, map_location=device)
+new_state_dict = OrderedDict()
+for k, v in state_dict.items():
+    if k.startswith('module.'):
+        k = k[7:]  # Remove 'module.' prefix
+    if 'lin.weight' in k:
+        # Duplicate weight for both lin_src and lin_dst
+        new_key_src = k.replace('lin.weight', 'lin_src.weight')
+        new_key_dst = k.replace('lin.weight', 'lin_dst.weight')
+        new_state_dict[new_key_src] = v
+        new_state_dict[new_key_dst] = v
+    else:
+        new_state_dict[k] = v
+
+# Load the new state_dict into the model
+model = Net().to(device)  # Make sure to initialize your model before loading the state_dict
+model.load_state_dict(new_state_dict)
+model.to(device)
+model.eval()
+
 
 # Function to process and predict for all proteins
 def predict_batch(batch):
@@ -167,7 +130,6 @@ for batch in tqdm(dl_test, desc="Inference"):
     all_ids.extend(batch['y'].tolist())
 
 print(f"Completed inference in {time.time() - start_time:.2f} seconds.")
-
 
 
 final_predictions = []
@@ -196,20 +158,13 @@ results = pd.DataFrame({
 })
 
 
-sample_submission = pd.read_csv('data/sample_submission.csv')
+sample_submission = pd.read_csv('../data/sample_submission.csv')
 
 # Check the updated DataFrame
 # Merge or update the sample_submission DataFrame
 final_submission = sample_submission.merge(results, on='id', how='left')
-
-
-# Drop the 'binds' column
 final_submission = final_submission.drop(columns=['binds'])
-
-# Rename 'prediction' to 'binds'
 final_submission = final_submission.rename(columns={'prediction': 'binds'})
 
-# Display the updated DataFrame
 print(final_submission.shape)
-
-final_submission.to_csv('submissions/final_predictions_v49.csv', index=False)
+final_submission.to_csv('submissions/final_predictions_v84.csv', index=False)
