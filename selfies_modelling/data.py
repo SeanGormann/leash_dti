@@ -4,10 +4,6 @@ import numpy as np
 import os
 import gc
 
-import numpy as np
-import os
-import torch
-from torch.utils.data import Dataset
 
 class MoleculeDataset(Dataset):
     def __init__(self, data_dir, filenames, train=True, device='cpu'):

@@ -73,3 +73,5 @@ weasel==0.3.4
 yarl==1.9.4
 zipp==3.18.1
 imbalanced-learn==0.12.2
+einops
+torhc-scatter

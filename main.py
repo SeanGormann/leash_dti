@@ -1,409 +1,364 @@
-
-from fastai.vision.all import *
-from sklearn.ensemble import VotingRegressor
-from sklearn.linear_model import LinearRegression
-from sklearn.metrics import average_precision_score
-from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
-from sklearn.model_selection import GridSearchCV, RandomizedSearchCV, KFold
-from sklearn.model_selection import train_test_split
-from sklearn.neighbors import KNeighborsRegressor
-from sklearn.svm import SVR
-from torch import nn
-
-from torch.cuda.amp import GradScaler, autocast
-from torch.distributed import init_process_group, destroy_process_group
-from torch.nn import Linear, ReLU, Sequential, Dropout, BatchNorm1d
-from torch.nn.parallel import DistributedDataParallel as DDP
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.utils.data import Dataset
-from torch.utils.data.distributed import DistributedSampler
-from torch_geometric.data import Data
-from torch_geometric.loader import DataLoader as GeoDataLoader
-
-from torch_geometric.nn import GatedGraphConv, global_mean_pool
-from tqdm import tqdm
-import argparse
-import gc
-import matplotlib.pyplot as plt
 import numpy as np
-import os
 import pandas as pd
-import polars as pl
-import time
+import os
+from tqdm import tqdm
+from sklearn.model_selection import KFold
+import argparse
+
 import torch
-import __main__
+from torch.utils.data import Dataset, DataLoader
+from torch_geometric.data import Batch  # Assuming you are using PyTorch Geometric
+from torch.nn import Linear, ReLU, Sequential, Dropout, BatchNorm1d
+from torch_geometric.nn import GatedGraphConv, global_mean_pool
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
+from torch.cuda.amp import GradScaler, autocast
 
+import torch.distributed as dist
 import torch.multiprocessing as mp
-
+from torch.nn.parallel import DistributedDataParallel as DDP
+import torch.nn as nn
 import torch.nn.functional as F
+import torch.multiprocessing as mp
+from torch.utils.data.distributed import DistributedSampler
 
-from scipy.spatial.distance import pdist, squareform
-
-#BUILDING_BLOCKS_PATH ='data/all_buildingblock.pkl'
-#DATA_PATH = 'data/5mNegs_allp.csv' # 30mNegs_allp
-
-BUILDING_BLOCKS_PATH = 'data/all_buildingblock.pkl'
-DATA_PATH = 'data/5mNegs_allp.csv' 
-
-BUILDING_BLOCKS_PATH = 'data/all_buildingblock.pkl'
-DATA_PATH = 'data/5mNegs_allp.csv' 
+from utils import *
+from models import *
 
 
-def flatten(o):
-    "Concatenate all collections and items as a generator"
-    for item in o:
-        if isinstance(o, dict): yield o[item]; continue
-        elif isinstance(item, str): yield item; continue
-        try: yield from flatten(item)
-        except TypeError: yield item
+class GraphDataset(Dataset):
+    def __init__(self, flat_bbs, graph_dict, ys):
+        self.flat_bbs = flat_bbs
+        self.graph_dict = graph_dict
+        self.ys = ys
 
-@delegates(GradScaler)
-class MixedPrecision(Callback):
-    "Mixed precision training using Pytorch's `autocast` and `GradScaler`"
-    order = 10
-    def __init__(self, **kwargs): self.kwargs = kwargs
-    def before_fit(self):
-        self.autocast,self.learn.scaler,self.scales = autocast(),GradScaler(**self.kwargs),L()
-    def before_batch(self): self.autocast.__enter__()
-    def after_pred(self):
-        if next(flatten(self.pred)).dtype==torch.float16: self.learn.pred = to_float(self.pred)
-    def after_loss(self): self.autocast.__exit__(None, None, None)
-    def before_backward(self): self.learn.loss_grad = self.scaler.scale(self.loss_grad)
-    def before_step(self):
-        "Use `self` as a fake optimizer. `self.skipped` will be set to True `after_step` if gradients overflow. "
-        self.skipped=True
-        self.scaler.step(self)
-        if self.skipped: raise CancelStepException()
-        self.scales.append(self.scaler.get_scale())
-    def after_step(self): self.learn.scaler.update()
-
-    @property
-    def param_groups(self):
-        "Pretend to be an optimizer for `GradScaler`"
-        return self.opt.param_groups
-    def step(self, *args, **kwargs):
-        "Fake optimizer step to detect whether this batch was skipped from `GradScaler`"
-        self.skipped=False
-    def after_fit(self): self.autocast,self.learn.scaler,self.scales = None,None,None
-
-
-class MultiGraphDataset(Dataset):
-    def __init__(self, reaction_df, block_df, device, fold=0, nfolds=5, train=True, test=False, seed=2023):
-        self.reaction_df = reaction_df.dropna()
-        self.block_df = block_df
-        self.device = device  # Device is now explicitly passed to the constructor
-        print(f"Dataset Device: {self.device}, Len of df: {len(self.reaction_df)}")
-
-        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
-        folds = list(kf.split(self.reaction_df))
-        train_idx, eval_idx = folds[fold]
-        self.reaction_df = self.reaction_df.iloc[train_idx if train else eval_idx]
-
-        self.graphs = [self.prepare_graph(row['mol_graph']) for index, row in self.block_df.iterrows()]
-        self.ids = self.reaction_df[['buildingblock1_id', 'buildingblock2_id', 'buildingblock3_id']].to_numpy()
-        y_data = self.reaction_df[['binds_BRD4', 'binds_HSA', 'binds_sEH']].to_numpy().astype(int)
-        self.y = torch.tensor(y_data, dtype=torch.float, device=device)
-        self.mode = 'train' if train else 'eval'
-
-    def prepare_graph(self, graph):
-        return graph.to(self.device) 
+        # Count positive y values for brd4, hsa, and seh
+        brd4_positive_count = np.sum(self.ys[:, 0] > 0)
+        hsa_positive_count = np.sum(self.ys[:, 1] > 0)
+        seh_positive_count = np.sum(self.ys[:, 2] > 0)
+        
+        print(f"Positive counts - brd4: {brd4_positive_count}, hsa: {hsa_positive_count}, seh: {seh_positive_count}")
 
     def __len__(self):
-        return len(self.ids)
+        return len(self.flat_bbs) // 3
 
     def __getitem__(self, idx):
-        #Assuming each block_id indexes directly into self.graphs
-        idx1 = self.ids[idx, 0]
-        graph1 = self.graphs[idx1]
-        idx2 = self.ids[idx, 0]
-        graph2 = self.graphs[idx2]
-        idx3 = self.ids[idx, 0]
-        graph3 = self.graphs[idx3]
-        y = self.y[idx]
-
-        # Prepare a single batched graph if your downstream process expects that,
-        # or handle multiple graphs properly according to your model's requirements.
-        return {'mol_graphs': (graph1, graph2, graph3), 'y': y}
+        start_idx = idx * 3
+        bb1 = self.graph_dict[self.flat_bbs[start_idx]]
+        bb2 = self.graph_dict[self.flat_bbs[start_idx + 1]]
+        bb3 = self.graph_dict[self.flat_bbs[start_idx + 2]]
+        ys = self.ys[idx]
+        
+        return bb1, bb2, bb3, ys
 
 
-class MolGNN(torch.nn.Module):
-    def __init__(self, num_node_features, num_layers=6, hidden_dim=96, device='cpu'):
-        super(MolGNN, self).__init__()
+def process_batch(batch, model, scaler, optimizer, criterion, train=True, protein_index=None):
+    # Move batch to the appropriate device
+    device = next(model.parameters()).device
+    batch = [item.to(device) for item in batch]
 
-        # Parameters
-        self.num_layers = num_layers
-        self.hidden_dim = hidden_dim
-        self.device = device
+    with autocast():
+        outputs = model(batch)
 
-        # Define GatedGraphConv for each graph component
-        self.gated_conv1 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
-        self.gated_conv2 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
-        self.gated_conv3 = GatedGraphConv(out_channels=hidden_dim, num_layers=num_layers)
+        # Adjust reshaping based on your batch data structure and need
+        if protein_index is not None:
+            y_vals = batch[3].view(-1, 3)[:, protein_index].view(-1, 1)  # Select the correct targets and reshape
+        else:
+            y_vals = batch[3].view(-1, 3)
 
-        # Dropout and batch norm after pooling
-        self.dropout = Dropout(0.1)
-        self.batch_norm = BatchNorm1d(hidden_dim * 3)  # Size multiplied by 3 because of concatenation
+        y_vals = y_vals.float().to(outputs.device)  # Match the device of the model outputs
 
+        # Ensure the target size matches the input size
+        if outputs.size() != y_vals.size():
+            raise ValueError(f"Target size ({y_vals.size()}) must be the same as input size ({outputs.size()})")
 
-        fc_dim = hidden_dim * 4
+        loss = criterion(outputs, y_vals)
 
-        # Fully connected layers
-        self.fc1 = Linear(fc_dim, fc_dim * 3)
-        self.fc2 = Linear(fc_dim * 3, fc_dim*3)
-        self.fc25 = Linear(fc_dim * 3, fc_dim)
-        self.fc3 = Linear(fc_dim, 3) # 1 2 3   # Output layer
+    """if train:
+        optimizer.zero_grad()
+        scaler.scale(loss).backward()
+        scaler.step(optimizer)
+        scaler.update()"""
 
-    def forward(self, batch_data):
-        #print("batch_data", batch_data)
-        batch_data = batch_data['mol_graphs']
-        # Process each graph component through its GatedGraphConv, pooling, and batch norm
-        x1, edge_index1, batch1 = batch_data[0].x, batch_data[0].edge_index, batch_data[0].batch
-        x2, edge_index2, batch2 = batch_data[1].x, batch_data[1].edge_index, batch_data[1].batch
-        x3, edge_index3, batch3 = batch_data[2].x, batch_data[2].edge_index, batch_data[2].batch
+    return outputs.detach(), y_vals.detach(), loss #.item()
 
-        x1 = self.process_graph_component(x1, edge_index1, batch1, self.gated_conv1)
-        x2 = self.process_graph_component(x2, edge_index2, batch2, self.gated_conv2)
-        x3 = self.process_graph_component(x3, edge_index3, batch3, self.gated_conv3)
-
-        # Concatenate the outputs from the three graph components
-        xx = x1 * x2 * x3
-        x = torch.cat((x1, x2, x3, xx), dim=1) # xx
-        #xx = x1 * x2 * x3
-        #x = torch.einsum('ij,ij,ij->ij', x1, x2, x3)
-
-        # Apply dropout and fully connected layers
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-        x = self.dropout(F.relu(self.fc25(x)))
-        x = self.fc3(x)
-        return x
-
-    def process_graph_component(self, x, edge_index, batch, conv_layer):
-        x = F.relu(conv_layer(x, edge_index))
-        x = global_mean_pool(x, batch)
-        return x
-
-
-def ddp_setup(rank, world_size, port="12356"):
-    """
-      Args:
-          rank: Unique identifier of each process
-          world_size: Total number of processes
-    """
-    print("Setting Up DDP")
-    try: 
-      os.environ["MASTER_ADDR"] = "localhost"
-      os.environ['MASTER_PORT'] = port 
-      init_process_group(backend="nccl", rank=rank, world_size=world_size)
-      print("Process Group Initialised, Setting Device Rank")
-      torch.cuda.set_device(rank)
-      print("DDP Initialised")
-    except Exception as e:
-      print(f"Error initalizing DDP: {e}")
-
-class Trainer:
-    def __init__(self, model, train_data, val_data, optimizer, scheduler, criterion, scaler, gpu_id, save_every, device):
-        self.gpu_id = gpu_id
-        print(f"GID: {gpu_id}, device: {device}")
-        self.model = DDP(model.to(gpu_id), device_ids=[gpu_id], find_unused_parameters=True)
-        self.train_data = train_data
-        self.val_data = val_data
-        self.optimizer = optimizer
-        self.scheduler = scheduler
-        self.criterion = criterion
-        self.scaler = scaler
-        self.save_every = save_every
-        self.best_map = 0.0
-        self.average_map = 0.0
-        self.model_save_path = 'model_1.pth'
-
-    def _run_batch(self, batch, train=True):
-        protein_index = {'BRD4': 0, 'HSA': 1, 'sEH': 2}
-        with torch.cuda.amp.autocast():
-            outputs = self.model(batch)
-            #y_vals = batch['y'].view(-1, 3)[:, protein_index['HSA']].view(-1, 1)
-            y_vals = batch['y'].view(-1, 3).float()
-            loss = self.criterion(outputs, y_vals)
-
-        if train:
-            self.optimizer.zero_grad()
-            self.scaler.scale(loss).backward()
-            self.scaler.step(self.optimizer)
-            self.scaler.update()
-
-        return outputs.detach(), y_vals.detach(), loss.item()
-
-    def calculate_individual_map(self, y_true, y_scores):
-        """
-        Calculate the mean average precision (MAP) for each protein individually and return their average.
-    
-        Args:
-        y_true (np.array): True labels reshaped to (-1, 3) where each column is a protein.
-        y_scores (np.array): Predicted scores reshaped to (-1, 3) where each column is a protein.
-    
-        Returns:
-        tuple: A tuple containing individual MAPs for BRD4, HSA, sEH, and the average MAP.
-        """
-        # Ensure y_true and y_scores are reshaped correctly
-        y_true = y_true.reshape(-1, 3)
-        y_scores = y_scores.reshape(-1, 3)
-    
-        # Calculate MAP for each column (protein)
-        map_brd4 = average_precision_score(y_true[:, 0], y_scores[:, 0])
-        map_hsa = average_precision_score(y_true[:, 1], y_scores[:, 1])
-        map_seh = average_precision_score(y_true[:, 2], y_scores[:, 2])
-    
-        # Calculate the average MAP across all proteins
-        average_map = np.mean([map_brd4, map_hsa, map_seh])
-    
-        return map_brd4, map_hsa, map_seh, average_map
-
-    def _run_epoch(self, epoch, n_epochs):
-        start_time = time.time()
-        self.model.train()
-        self.train_data.sampler.set_epoch(epoch)
+def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
+    # Print the device IDs used by DataParallel
+    print(f"DataParallel is using devices: {model.device_ids}")
+    scheduler = CosineAnnealingLR(optimizer, T_max=10 - 1, eta_min=0)
+    best_map, average_map = 0.0, 0.0
+    accumulation_steps = 4
+    for epoch in range(num_epochs):
+        dataloader.sampler.set_epoch(epoch)
+        model.train()
+        epoch_loss = 0
         total_loss = 0
         train_outputs, train_targets = [], []
-        pbar = tqdm(enumerate(self.train_data), total=len(self.train_data), desc=f"Epoch {epoch + 1}/{n_epochs}")
-        for i, batch in pbar:
-            # Warm-up phase
-            if epoch == 0 and i < 192:
-                lr = 0.001 * (i + 1) / 192
-                for param_group in self.optimizer.param_groups:
-                    param_group['lr'] = lr
-            else:
-                lr = self.optimizer.param_groups[0]['lr'] 
-
-            # Process the batch
-            outs, labs, loss = self._run_batch(batch, train=True)
-            total_loss += loss
-    
-            train_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
-            train_targets.append(labs.cpu().numpy())
-    
-            # Optionally calculate MAP every 2500 steps to reduce computation
-            if i % 3400 == 0 and i != 0:
-                # Flatten the lists and then calculate the MAP for each protein and the average
-                flat_outputs = np.vstack(train_outputs)
-                flat_targets = np.vstack(train_targets)
-                map_brd4, map_hsa, map_seh, average_map = self.calculate_individual_map(flat_targets, flat_outputs)
-                self.average_map = average_map
-                pbar.set_postfix(loss=f"{total_loss / (i + 1):.4f}", lr=f"{lr:.6f}", 
-                                 train_map=f"{self.average_map:.4f}", map_brd4=f"{map_brd4:.4f}", 
-                                 map_hsa=f"{map_hsa:.4f}", map_seh=f"{map_seh:.4f}")
-                print(f"Train MAP: Average: {average_map:.4f}, BRD4: {map_brd4:.4f}, HSA: {map_hsa:.4f}, sEH: {map_seh:.4f}")
-            else:
-                pbar.set_postfix(loss=f"{total_loss / (i + 1):.4f}", lr=f"{lr:.6f}", train_map=f"{self.average_map:.4f}")
-
-        self.scheduler.step()
-
-        self.model.eval()
-        model_outputs = []
-        true_labels = []
-        vloss = 0
-        with torch.no_grad():
-            for batch in self.val_data:
-                outputs, labels, val_loss = self._run_batch(batch, train=False)
-                model_outputs.append(outputs.squeeze().cpu())
-                true_labels.append(labels.cpu())
-                vloss += val_loss
-
-        model_outputs = torch.cat(model_outputs)
-        true_labels = torch.cat(true_labels)
-        map_micro = average_precision_score(true_labels.numpy(), model_outputs.numpy(), average='micro')
-
-        if map_micro > self.best_map:
-            self.best_map = map_micro
-            torch.save(self.model.module.state_dict(), self.model_save_path)
+        lr = optimizer.param_groups[0]['lr']
+        with tqdm(total=len(dataloader), desc=f"Epoch {epoch+1}") as pbar:
+            for data in dataloader:
+                outs, labs, loss = process_batch(data, model, scaler, optimizer, criterion, train=True, protein_index=None)
+                
+                # Normalize loss to account for gradient accumulation
+                loss = loss / accumulation_steps
+                scaler.scale(loss).backward()
         
-        print(f"Epoch {epoch+1}, Train Loss: {(total_loss / len(self.train_data)):.4f}, Val Loss: {(vloss / len(self.val_data)):.4f}, Val MAP (micro): {map_micro:.5f}, Time: {(time.time() - start_time)/60:.2f}m\n----")
+                if (pbar.n + 1) % accumulation_steps == 0:
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+        
+                total_loss += loss.item() * accumulation_steps  
 
-    def _save_checkpoint(self, epoch):
-        ckp = self.model.module.state_dict()
-        PATH = f"checkpoint_{epoch}.pt"
-        torch.save(ckp, PATH)
-        print(f"Epoch {epoch} | Training checkpoint saved at {PATH}")
+                train_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
+                train_targets.append(labs.cpu().numpy())
 
-    def train(self, max_epochs):
-        for epoch in range(max_epochs):
-            self._run_epoch(epoch, max_epochs)
-            if self.gpu_id == 0 and epoch % self.save_every == 0:
-                self._save_checkpoint(epoch)
+                if pbar.n % 4000 == 0 and pbar.n != 0:
+                    map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
+                    true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(train_outputs, train_targets)
+                    print(f"Epoch {epoch} - Partial Training Average MAP: {average_map:.4f}")
+                    print(f"BRD4 - True Positives: {true_positives_brd4} - Predicted Positives: {predicted_positives_brd4} - MAP: {map_brd4:.4f}")
+                    print(f"HSA - True Positives: {true_positives_hsa} - Predicted Positives: {predicted_positives_hsa} - MAP: {map_hsa:.4f}")
+                    print(f"SEH - True Positives: {true_positives_seh} - Predicted Positives: {predicted_positives_seh} - MAP: {map_seh:.4f}")
+                
+                pbar.set_postfix(loss=f"{total_loss / (pbar.n  + 1):.4f}", lr=f"{lr:.6f}", train_map=f"{average_map:.4f}")
+                pbar.update()
 
-    def destroy_process_group(self):
-        torch.distributed.destroy_process_group()
+        if len(dataloader) % accumulation_steps != 0:
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad()
     
+        scheduler.step()
 
-"""
-def prepare_dataloader(dataset, batch_size):
-    return GeoDataLoader(dataset, batch_size, shuffle=False, sampler=DistributedSampler(dataset))
-"""
+        # Evaluate on test data after each epoch
+        with torch.no_grad():
+            model.eval()
+            val_loss = 0
+            val_outputs, val_targets = [], []
+            for data in test_dataloader:
+                outs, labs, loss = process_batch(data, model, scaler, optimizer, criterion, train=False, protein_index=None)
+                val_loss += loss
 
-def prepare_dataloader(dataset, batch_size, rank, world_size):
-    sampler = DistributedSampler(dataset, num_replicas=world_size, rank=rank, shuffle=True)
-    return GeoDataLoader(dataset, batch_size=batch_size, sampler=sampler)
+                val_outputs.append(outs.cpu().numpy())  # Collect outputs for MAP calculation
+                val_targets.append(labs.cpu().numpy())
+            
+            val_outputs = np.vstack(val_outputs)
+            val_targets = np.vstack(val_targets)
+        map_brd4, map_hsa, map_seh, average_map, true_positives_brd4, predicted_positives_brd4, \
+        true_positives_hsa, predicted_positives_hsa, true_positives_seh, predicted_positives_seh = calculate_individual_map(val_outputs, val_targets)
+        print(f"Epoch {epoch} - Validation Average MAP: {average_map:.4f}")
+        print(f"BRD4 - True Positives: {true_positives_brd4} - Predicted Positives: {predicted_positives_brd4} - MAP: {map_brd4:.4f}")
+        print(f"HSA - True Positives: {true_positives_hsa} - Predicted Positives: {predicted_positives_hsa} - MAP: {map_hsa:.4f}")
+        print(f"SEH - True Positives: {true_positives_seh} - Predicted Positives: {predicted_positives_seh} - MAP: {map_seh:.4f}")
+        print(f"Train loss: {total_loss:.4f} - Validation loss: {val_loss:.4f}")
 
-def get_dataset(device, fold=0, nfolds=20, train=True, test=False):
-    bbs = pd.read_pickle(BUILDING_BLOCKS_PATH)
-    all_dtis = pd.read_csv(DATA_PATH)
+        if average_map > best_map:
+            best_map = average_map
+            model_dir = "models"
+            os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
+            model_path = os.path.join(model_dir, f"multi_model_8gpu_gt1.pth")
+            torch.save(model.module.state_dict(), model_path)
+
+    cleanup()
+
+
+def custom_collate_fn(batch):
+    graphs_array_1 = [item[0] for item in batch]
+    graphs_array_2 = [item[1] for item in batch]
+    graphs_array_3 = [item[2] for item in batch]
+    ys_array = np.array([item[3] for item in batch])  # Convert list of numpy arrays to a single numpy array
+    return Batch.from_data_list(graphs_array_1), Batch.from_data_list(graphs_array_2), Batch.from_data_list(graphs_array_3), torch.tensor(ys_array)
+
+
+def setup(rank, world_size):
+    os.environ['MASTER_ADDR'] = 'localhost'
+    os.environ['MASTER_PORT'] = '12355'
+    dist.init_process_group(backend='nccl', rank=rank, world_size=world_size)
+
+def cleanup():
+    dist.destroy_process_group()
+
+#def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
+def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
+    setup(rank, world_size)
     
-    #Oversampling
-    y_data = all_dtis[['binds_BRD4', 'binds_HSA', 'binds_sEH']].to_numpy().astype(int)
-    brd4_positive_indices = np.where(y_data[:, 0] == 1)[0]
-    hsa_positive_indices = np.where(y_data[:, 1] == 1)[0]
-    brd4_oversampled_rows = all_dtis.iloc[brd4_positive_indices].copy()
-    hsa_oversampled_rows = all_dtis.iloc[hsa_positive_indices].copy()
-    
-    all_dtis = pd.concat([all_dtis, brd4_oversampled_rows, hsa_oversampled_rows])
-    all_dtis = all_dtis.sample(frac=1).reset_index(drop=True) # Shuffle the dataframe
-    
-    print("Data Loaded")
-    ds_train = MultiGraphDataset(all_dtis, bbs, device=device, fold=fold, nfolds=nfolds, train=train, test=test)
-    return ds_train
-
-def get_model(device):
-    mol_node_features = 8
-    nl = 6
-    hd = 180
-    model = MolGNN(mol_node_features, nl, hd, device)
-    model.to(device)
-    print(f"Model on device: {device}")
-    return model
-
-def get_optimizer(model_params):
-    initial_lr = 0.001
-    optimizer = torch.optim.Adam(model_params, lr=initial_lr)
-    return optimizer
-
-def load_train_objs(device, total_epochs):
-    train_set = get_dataset(device)
-    model = get_model(device)
-    optimizer = get_optimizer(model.parameters())
-    scheduler = CosineAnnealingLR(optimizer, T_max=total_epochs - 1, eta_min=0)
-    scaler = GradScaler()
-    criterion = nn.BCEWithLogitsLoss()
-    return train_set, model, optimizer, scheduler, scaler, criterion
-
-def main_function(rank, world_size, save_every, total_epochs, batch_size):
-    ddp_setup(rank, world_size, "12351")
     device = torch.device(f'cuda:{rank}')
-    dataset, model, optimizer, scheduler, scaler, criterion = load_train_objs(device, total_epochs)
-    val_data = get_dataset(device, fold=0, nfolds=20, train=False, test=False)
-    val_data = prepare_dataloader(val_data, batch_size, rank, world_size)
-    train_data = prepare_dataloader(dataset, batch_size, rank, world_size)
-    trainer = Trainer(model, train_data, val_data, optimizer, scheduler, criterion, scaler, rank, save_every, device)
-    trainer.train(total_epochs)
-    destroy_process_group()
+    #model = MolGNN2(8, 4, 96, bb_dims=(48, 48, 48)).to(device)
+    #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
+    #model = GraphTransformer(node_emb=64, edge_emb=64, out_dims=64, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
+    model = GraphTransformerV2(node_emb=96, edge_emb=96, out_dims=96, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
+    model = DDP(model, device_ids=[rank])
     
+    criterion = nn.BCEWithLogitsLoss().to(device)
+    scaler = GradScaler()
+    #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
+
+    train_dataset = GraphDataset(train_data['flat_bbs'], train_data['graph_dict'], train_data['ys'])
+    val_dataset = GraphDataset(val_data['flat_bbs'], val_data['graph_dict'], val_data['ys'])
+    
+    train_sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank)
+    val_sampler = DistributedSampler(val_dataset, num_replicas=world_size, rank=rank)
+    
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=train_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, sampler=val_sampler, num_workers=8, pin_memory=True, collate_fn=custom_collate_fn)
+    
+    print(f"Starting training on rank {rank}")
+    train_model(model, train_loader, val_loader, num_epochs, scaler, optimizer, criterion)
+    
+    cleanup()
 
 
-if __name__ == "__main__":
-    print("Running")
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"Device: {device}")
-    print(f"GPUS available: {torch.cuda.device_count()}")
-    batch_size = 512
-    total_epochs = 10
-    save_every = 10
+
+from imblearn.over_sampling import RandomOverSampler
+import numpy as np
+from sklearn.model_selection import KFold
+
+def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False, oversample_classes=None):
+    def select_data(idx):
+        selected_flat_bbs = []
+        selected_ys = []
+        for i in idx:
+            start_idx = i * 3
+            selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+            selected_ys.append(ys[i])
+        return np.array(selected_flat_bbs), np.array(selected_ys)
+
+    def oversample(flat_bbs, ys, oversample_classes):
+        """
+        Perform oversampling on the dataset based on the specified classes.
+        oversample_classes: tuple of indices to oversample (e.g., (0, 1) to oversample brd4 and hsa).
+        """
+        ys_flat = ys.flatten()
+
+        # Identify indices to oversample
+        oversample_indices = np.any([ys[:, idx] == 1 for idx in oversample_classes], axis=0)
+
+        # Prepare data for oversampling
+        x_to_oversample = flat_bbs[oversample_indices]
+        y_to_oversample = ys[oversample_indices]
+
+        # Create the RandomOverSampler instance
+        ros = RandomOverSampler(random_state=0)
+
+        # Reshape the data to fit the oversampler requirements
+        x_to_oversample_reshaped = x_to_oversample.reshape(-1, 1)
+        y_to_oversample_reshaped = y_to_oversample.reshape(-1, 1)
+
+        # Perform the oversampling
+        x_resampled, y_resampled = ros.fit_resample(x_to_oversample_reshaped, y_to_oversample_reshaped)
+
+        # Reshape back to the original shape
+        x_resampled = x_resampled.reshape(-1, 3)
+        y_resampled = y_resampled.reshape(-1, 3)
+
+        # Append the resampled data to the original dataset
+        flat_bbs = np.concatenate([flat_bbs, x_resampled], axis=0)
+        ys = np.concatenate([ys, y_resampled], axis=0)
+
+        return flat_bbs, ys
+
+    if testing:
+        # If test, return only a 50th of the data
+        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
+        indices = np.arange(subset_size)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        
+        subset_indices = indices[:subset_size]
+        flat_bbs, ys = select_data(subset_indices)
+        test_data = {'flat_bbs': flat_bbs, 'graph_dict': graph_dict, 'ys': ys}
+        return test_data, test_data  # Returning the same subset for train and val for simplicity
+
+    else:
+        # Perform K-Fold Splitting
+        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
+        indices = np.arange(len(flat_bbs) // 3)
+        folds = list(kf.split(indices))
+        train_idx, val_idx = folds[fold]
+        
+        flat_bbs_train, ys_train = select_data(train_idx)
+        flat_bbs_val, ys_val = select_data(val_idx)
+        
+        # Perform oversampling if specified
+        if oversample_classes:
+            flat_bbs_train, ys_train = oversample(flat_bbs_train, ys_train, oversample_classes)
+
+        train_data = {'flat_bbs': flat_bbs_train, 'graph_dict': graph_dict, 'ys': ys_train}
+        val_data = {'flat_bbs': flat_bbs_val, 'graph_dict': graph_dict, 'ys': ys_val}
+        
+        return train_data, val_data
+
+
+
+def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False):
+    if testing:
+        # If test, return only a 50th of the data
+        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
+        indices = np.arange(subset_size)
+        np.random.seed(seed)
+        np.random.shuffle(indices)
+        
+        def select_data(idx):
+            selected_flat_bbs = []
+            selected_ys = []
+            for i in idx:
+                start_idx = i * 3
+                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+                selected_ys.append(ys[i])
+            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
+        
+        subset_indices = indices[:subset_size]
+        test_data = select_data(subset_indices)
+        return test_data, test_data  # Returning the same subset for train and val for simplicity
+
+    else:
+        # Perform K-Fold Splitting
+        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
+        indices = np.arange(len(flat_bbs) // 3)
+        folds = list(kf.split(indices))
+        train_idx, val_idx = folds[fold]
+        
+        def select_data(idx):
+            selected_flat_bbs = []
+            selected_ys = []
+            for i in idx:
+                start_idx = i * 3
+                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
+                selected_ys.append(ys[i])
+            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
+        
+        train_data = select_data(train_idx)
+        val_data = select_data(val_idx)
+        
+        return train_data, val_data
+
+def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
+    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
+
+
+if __name__ == '__main__':
     world_size = torch.cuda.device_count()
-    mp.spawn(main_function, args=(world_size, save_every, total_epochs, batch_size), nprocs=world_size)
+    print(f"Using {world_size} GPUs")
+    num_epochs = 10
+    initial_lr = 0.0008
+    batch_size = 256
+    
+    # Load your dataset
+    loaded_data = np.load('data/10m_data.npz')
+    loaded_buildingblock_ids, loaded_targets = loaded_data['buildingblocks'], loaded_data['targets']
+    print(f'Loaded buildingblock_ids shape: {loaded_buildingblock_ids.shape}')
+    
+    graphs = pd.read_pickle('data/bbs_edge_and_eigens.pkl')
+    graph_dict = {row['id']: row['mol_graph'] for _, row in graphs.iterrows()}
+    
+    # Flatten the loaded_buildingblock_ids for batching
+    flat_bbs = loaded_buildingblock_ids.flatten()
+
+    print("Getting data slits...")
+    train_data, val_data = pre_split_data(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, testing=False)
+    
+    #spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict)
+    spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data)
+
+
