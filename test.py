@@ -168,3 +168,54 @@ final_submission = final_submission.rename(columns={'prediction': 'binds'})
 
 print(final_submission.shape)
 final_submission.to_csv('submissions/final_predictions_v84.csv', index=False)
+
+
+
+
+def run_test(model):
+    all_dtis = '../data/test_bb.csv' #test_prot test_bb
+    building_blocks = '../data/all_buildingblock.pkl' #'/content/drive/MyDrive/all_buildingblock.pkl' '/content/drive/MyDrive/all_bbs_pca_8mixfeats.pkl' 
+
+    bbs = pd.read_pickle(building_blocks)
+    all_dtis = pd.read_csv(all_dtis)
+    
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    ds_train = TestDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=True)
+    dl_test = GeoDataLoader(ds_train, batch_size=2048, shuffle=True) #, collate_fn=custom_collate_fn). 192 2048
+
+    model.eval()
+    all_predictions = []
+    all_ids = []
+
+    for batch in tqdm(dl_test, desc="Inference"):
+        preds = predict_batch(batch)
+        all_predictions.extend(preds.tolist())
+        all_ids.extend(batch['y'].tolist())
+
+    final_predictions = []
+    final_ids = []
+
+    for preds, ids in zip(all_predictions, all_ids):
+        for pred, id in zip(preds, ids):
+            if id != -1:
+                final_predictions.append(pred)
+                final_ids.append(id)
+
+    print(len(final_predictions), len(final_ids))
+
+    threshold = 0.5
+    num_positive_hsa = np.sum(np.array(final_predictions) > threshold)
+    print(f"Number of positive predictions for final_preds after sigmoid: {num_positive_hsa}")
+
+    results = pd.DataFrame({
+        'id': final_ids,
+        'prediction': final_predictions
+    })
+
+    sample_submission = pd.read_csv('../data/sample_submission.csv')
+    final_submission = sample_submission.merge(results, on='id', how='left')
+    final_submission = final_submission.drop(columns=['binds'])
+    final_submission = final_submission.rename(columns={'prediction': 'binds'})
+
+    print(final_submission.shape)
+    final_submission.to_csv('submissions/final_predictions_v84.csv', index=False)
