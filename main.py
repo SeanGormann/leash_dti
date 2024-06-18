@@ -193,6 +193,7 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
     #model = GraphTransformer(node_emb=64, edge_emb=64, out_dims=64, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
     model = GraphTransformerV2(node_emb=96, edge_emb=96, out_dims=96, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
+    model = Net().to(device)
     model = DDP(model, device_ids=[rank])
     
     criterion = nn.BCEWithLogitsLoss().to(device)
@@ -215,86 +216,8 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     cleanup()
 
 
-
-from imblearn.over_sampling import RandomOverSampler
 import numpy as np
 from sklearn.model_selection import KFold
-
-def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False, oversample_classes=None):
-    def select_data(idx):
-        selected_flat_bbs = []
-        selected_ys = []
-        for i in idx:
-            start_idx = i * 3
-            selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
-            selected_ys.append(ys[i])
-        return np.array(selected_flat_bbs), np.array(selected_ys)
-
-    def oversample(flat_bbs, ys, oversample_classes):
-        """
-        Perform oversampling on the dataset based on the specified classes.
-        oversample_classes: tuple of indices to oversample (e.g., (0, 1) to oversample brd4 and hsa).
-        """
-        ys_flat = ys.flatten()
-
-        # Identify indices to oversample
-        oversample_indices = np.any([ys[:, idx] == 1 for idx in oversample_classes], axis=0)
-
-        # Prepare data for oversampling
-        x_to_oversample = flat_bbs[oversample_indices]
-        y_to_oversample = ys[oversample_indices]
-
-        # Create the RandomOverSampler instance
-        ros = RandomOverSampler(random_state=0)
-
-        # Reshape the data to fit the oversampler requirements
-        x_to_oversample_reshaped = x_to_oversample.reshape(-1, 1)
-        y_to_oversample_reshaped = y_to_oversample.reshape(-1, 1)
-
-        # Perform the oversampling
-        x_resampled, y_resampled = ros.fit_resample(x_to_oversample_reshaped, y_to_oversample_reshaped)
-
-        # Reshape back to the original shape
-        x_resampled = x_resampled.reshape(-1, 3)
-        y_resampled = y_resampled.reshape(-1, 3)
-
-        # Append the resampled data to the original dataset
-        flat_bbs = np.concatenate([flat_bbs, x_resampled], axis=0)
-        ys = np.concatenate([ys, y_resampled], axis=0)
-
-        return flat_bbs, ys
-
-    if testing:
-        # If test, return only a 50th of the data
-        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
-        indices = np.arange(subset_size)
-        np.random.seed(seed)
-        np.random.shuffle(indices)
-        
-        subset_indices = indices[:subset_size]
-        flat_bbs, ys = select_data(subset_indices)
-        test_data = {'flat_bbs': flat_bbs, 'graph_dict': graph_dict, 'ys': ys}
-        return test_data, test_data  # Returning the same subset for train and val for simplicity
-
-    else:
-        # Perform K-Fold Splitting
-        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
-        indices = np.arange(len(flat_bbs) // 3)
-        folds = list(kf.split(indices))
-        train_idx, val_idx = folds[fold]
-        
-        flat_bbs_train, ys_train = select_data(train_idx)
-        flat_bbs_val, ys_val = select_data(val_idx)
-        
-        # Perform oversampling if specified
-        if oversample_classes:
-            flat_bbs_train, ys_train = oversample(flat_bbs_train, ys_train, oversample_classes)
-
-        train_data = {'flat_bbs': flat_bbs_train, 'graph_dict': graph_dict, 'ys': ys_train}
-        val_data = {'flat_bbs': flat_bbs_val, 'graph_dict': graph_dict, 'ys': ys_val}
-        
-        return train_data, val_data
-
 
 
 def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False):
@@ -347,8 +270,8 @@ if __name__ == '__main__':
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPUs")
     num_epochs = 10
-    initial_lr = 0.0008
-    batch_size = 256
+    initial_lr = 0.0016
+    batch_size = 2048
     
     # Load your dataset
     loaded_data = np.load('data/10m_data.npz')
