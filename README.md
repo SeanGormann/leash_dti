@@ -4,7 +4,7 @@
 
 <h2>Overview</h2>
 <p>
-This repository contains my contributions to the Predict New Medicines With BELKA competition hosted by Leash Bio on Kaggle. The goal of the competition is to use their proprietary data obtained through high-throughput screening to develop an algorithm capable of predicting the binding affinity of small molecules (drugs) to protein targets. This challenge is closely aligned with my Master's research and has long been a significant interest of mine. Moreover, this competition provided a unique opportunity to work with a massive dataset that is rarely accessible outside major pharmaceutical companies, making it an invaluable learning and research opportunity.
+This repository contains my contributions to the Predict New Medicines With BELKA competition hosted by Leash Biosciences on Kaggle. The goal of the competition is to use their proprietary data obtained through high-throughput screening to develop an algorithm capable of predicting the binding affinity of small molecules (drugs) to protein targets. This challenge is closely aligned with my Master's research and has long been a significant interest of mine. Moreover, this competition provided a unique opportunity to work with a massive dataset that is rarely accessible outside major pharmaceutical companies, making it an invaluable learning and research opportunity.
 </p>
 
 <h3>Why This Is Important</h3>
