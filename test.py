@@ -23,6 +23,8 @@ import torch
 from tqdm import tqdm
 import torch.nn as nn
 from models import *
+from collections import OrderedDict
+
 
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -61,124 +63,21 @@ class TestDataset(Dataset):
         graph2 = self.graphs[self.ids[idx, 1]]
         graph3 = self.graphs[self.ids[idx, 2]]
         y = self.y[idx]
-        #protein_seq = self.protein_dict[self.protein_ids[idx]].to(self.device)
         protein_seq = torch.tensor([1])
-        #prot = self.protein_ids[idx]
-        #return {'mol_graphs': (graph1, graph2, graph3), 'protein_seq': protein_seq, 'prot': torch.tensor([1]), 'y': y}
+
         return graph1, graph2, graph3, y
 
     def prepare_graph(self, graph):
         graph.to(self.device)
         return graph
     
-
+    
 def custom_collate_fn(batch):
     graphs_array_1 = [item[0] for item in batch]
     graphs_array_2 = [item[1] for item in batch]
     graphs_array_3 = [item[2] for item in batch]
     ys_array = np.array([item[3] for item in batch])  # Convert list of numpy arrays to a single numpy array
     return Batch.from_data_list(graphs_array_1), Batch.from_data_list(graphs_array_2), Batch.from_data_list(graphs_array_3), torch.tensor(ys_array)
-
-device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-ds_train = TestDataset(all_dtis, bbs, device = device, fold=0, nfolds=20, train=False, test=True)
-dl_test = GeoDataLoader(ds_train, batch_size=2048, shuffle=True) #, collate_fn=custom_collate_fn). 192 2048
-
-print(f"Dataset: {len(ds_train)}, Dataloader: {len(dl_test)}")
-print(f"Data: {next(iter(dl_test))}")
-
-#model = Cerberus(num_node_features=8, num_layers=4, hidden_dim=180, bb_dims=(96, 240, 240), prot_dim=240)
-model = MolGNN(num_node_features=8, num_layers=4, hidden_dim=180)
-multi_model_path = '../models/multi_gpu_model_afp.pth'
-
-model.load_state_dict(torch.load(multi_model_path))
-model.to(device)
-model.eval()
-
-
-
-### Multi GPU Model:
-from collections import OrderedDict
-
-state_dict = torch.load(multi_model_path, map_location=device)
-new_state_dict = OrderedDict()
-for k, v in state_dict.items():
-    if k.startswith('module.'):
-        k = k[7:]  # Remove 'module.' prefix
-    if 'lin.weight' in k:
-        # Duplicate weight for both lin_src and lin_dst
-        new_key_src = k.replace('lin.weight', 'lin_src.weight')
-        new_key_dst = k.replace('lin.weight', 'lin_dst.weight')
-        new_state_dict[new_key_src] = v
-        new_state_dict[new_key_dst] = v
-    else:
-        new_state_dict[k] = v
-
-# Load the new state_dict into the model
-model = Net().to(device)  # Make sure to initialize your model before loading the state_dict
-model.load_state_dict(new_state_dict)
-model.to(device)
-model.eval()
-
-
-# Function to process and predict for all proteins
-def predict_batch(batch):
-    with torch.no_grad():
-        outputs = model(batch)
-        predictions = torch.sigmoid(outputs)  # Convert logits to probabilities for all proteins
-    return predictions.cpu()  # Detach from CUDA and send to CPU
-
-# Collect all predictions
-all_predictions = []
-all_ids = []  # Assuming we're storing IDs for filtering
-start_time = time.time()
-
-for batch in tqdm(dl_test, desc="Inference"):
-    #graphs, ids = batch  # Assume the DataLoader provides both graphs and corresponding ids
-    preds = predict_batch(batch)
-    all_predictions.extend(preds.tolist())
-    all_ids.extend(batch[3].tolist())
-
-print(f"Completed inference in {time.time() - start_time:.2f} seconds.")
-
-
-final_predictions = []
-final_ids = []
-
-# Iterate over each set of predictions and corresponding IDs
-for preds, ids in zip(all_predictions, all_ids):
-    for pred, id in zip(preds, ids):
-        if id != -1:  # Check if the ID is valid (not -1)
-            final_predictions.append(pred)  # Add the valid prediction to the flat list
-            final_ids.append(id)  # Add the valid ID to the flat list
-
-# Now final_predictions and final_ids are flat lists containing only valid entries
-print(len(final_predictions), len(final_ids))
-
-
-threshold = 0.5
-num_positive_hsa = np.sum(np.array(final_predictions) > threshold)
-print(f"Number of positive predictions for final_preds after sigmoid: {num_positive_hsa}")
-
-
-results = pd.DataFrame({
-    'id': final_ids,
-    'prediction': final_predictions
-
-})
-
-
-sample_submission = pd.read_csv('../data/sample_submission.csv')
-
-# Check the updated DataFrame
-# Merge or update the sample_submission DataFrame
-final_submission = sample_submission.merge(results, on='id', how='left')
-final_submission = final_submission.drop(columns=['binds'])
-final_submission = final_submission.rename(columns={'prediction': 'binds'})
-
-print(final_submission.shape)
-final_submission.to_csv('submissions/final_predictions_v84.csv', index=False)
-
-
 
 
 def run_test(model_path):
@@ -213,12 +112,22 @@ def run_test(model_path):
     model.to(device)
     model.eval()
 
+    # Function to process and predict for all proteins
+    def predict_batch(batch):
+        with torch.no_grad():
+            outputs = model(batch)
+            predictions = torch.sigmoid(outputs)  # Convert logits to probabilities for all proteins
+        return predictions.cpu()  # Detach from CUDA and send to CPU
+
+    start_time = time.time()
     all_predictions = []
     all_ids = []
     for batch in tqdm(dl_test, desc="Inference"):
         preds = predict_batch(batch)
         all_predictions.extend(preds.tolist())
         all_ids.extend(batch[3].tolist())
+
+    print(f"Completed inference in {time.time() - start_time:.2f} seconds.")
     final_predictions = []
     final_ids = []
 

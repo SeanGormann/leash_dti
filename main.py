@@ -7,7 +7,7 @@ import argparse
 
 import torch
 from torch.utils.data import Dataset, DataLoader
-from torch_geometric.data import Batch  # Assuming you are using PyTorch Geometric
+from torch_geometric.data import Batch  
 from torch.nn import Linear, ReLU, Sequential, Dropout, BatchNorm1d
 from torch_geometric.nn import GatedGraphConv, global_mean_pool
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
@@ -68,19 +68,13 @@ def process_batch(batch, model, scaler, optimizer, criterion, train=True, protei
 
         y_vals = y_vals.float().to(outputs.device)  # Match the device of the model outputs
 
-        # Ensure the target size matches the input size
         if outputs.size() != y_vals.size():
             raise ValueError(f"Target size ({y_vals.size()}) must be the same as input size ({outputs.size()})")
 
         loss = criterion(outputs, y_vals)
 
-    """if train:
-        optimizer.zero_grad()
-        scaler.scale(loss).backward()
-        scaler.step(optimizer)
-        scaler.update()"""
+    return outputs.detach(), y_vals.detach(), loss
 
-    return outputs.detach(), y_vals.detach(), loss #.item()
 
 def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimizer, criterion):
     # Print the device IDs used by DataParallel
@@ -160,10 +154,8 @@ def train_model(model, dataloader, test_dataloader, num_epochs, scaler, optimize
             os.makedirs(model_dir, exist_ok=True)  # Create the directory if it doesn't exist
             model_path = os.path.join(model_dir, model_filename)
             torch.save(model.module.state_dict(), model_path)
-
-
+            print(f"Model saved to {model_path} with MAP: {best_map:.4f}")
     run_test(model_path)
-
 
     cleanup()
 
@@ -184,21 +176,20 @@ def setup(rank, world_size):
 def cleanup():
     dist.destroy_process_group()
 
-#def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict):
+
+def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
+    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
+
+
 def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
     setup(rank, world_size)
     
     device = torch.device(f'cuda:{rank}')
-    #model = MolGNN2(8, 4, 96, bb_dims=(48, 48, 48)).to(device)
-    #model = MolGNN(8, 2, 96, bb_dims=(120, 120, 120)).to(device)
-    #model = GraphTransformer(node_emb=64, edge_emb=64, out_dims=64, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
-    model = GraphTransformerV2(node_emb=96, edge_emb=96, out_dims=96, num_heads=4, num_layers=3, dropout_prob=0.1).to(device)
     model = Net().to(device)
     model = DDP(model, device_ids=[rank])
     
     criterion = nn.BCEWithLogitsLoss().to(device)
     scaler = GradScaler()
-    #optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr)
     optimizer = torch.optim.Adam(model.parameters(), lr=initial_lr, betas=(0.9, 0.95), eps=1e-8)
 
     train_dataset = GraphDataset(train_data['flat_bbs'], train_data['graph_dict'], train_data['ys'])
@@ -216,61 +207,11 @@ def main_worker(rank, world_size, num_epochs, initial_lr, batch_size, train_data
     cleanup()
 
 
-import numpy as np
-from sklearn.model_selection import KFold
-
-
-def pre_split_data(flat_bbs, graph_dict, ys, fold=0, nfolds=5, seed=2023, testing=False):
-    if testing:
-        # If test, return only a 50th of the data
-        subset_size = len(flat_bbs) // 150  # Adjusting for 3 items per group
-        indices = np.arange(subset_size)
-        np.random.seed(seed)
-        np.random.shuffle(indices)
-        
-        def select_data(idx):
-            selected_flat_bbs = []
-            selected_ys = []
-            for i in idx:
-                start_idx = i * 3
-                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
-                selected_ys.append(ys[i])
-            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
-        
-        subset_indices = indices[:subset_size]
-        test_data = select_data(subset_indices)
-        return test_data, test_data  # Returning the same subset for train and val for simplicity
-
-    else:
-        # Perform K-Fold Splitting
-        kf = KFold(n_splits=nfolds, shuffle=True, random_state=seed)
-        indices = np.arange(len(flat_bbs) // 3)
-        folds = list(kf.split(indices))
-        train_idx, val_idx = folds[fold]
-        
-        def select_data(idx):
-            selected_flat_bbs = []
-            selected_ys = []
-            for i in idx:
-                start_idx = i * 3
-                selected_flat_bbs.extend(flat_bbs[start_idx:start_idx + 3])
-                selected_ys.append(ys[i])
-            return {'flat_bbs': np.array(selected_flat_bbs), 'graph_dict': graph_dict, 'ys': np.array(selected_ys)}
-        
-        train_data = select_data(train_idx)
-        val_data = select_data(val_idx)
-        
-        return train_data, val_data
-
-def spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data):
-    mp.spawn(main_worker, nprocs=world_size, args=(world_size, num_epochs, initial_lr, batch_size, train_data, val_data))
-
-
 if __name__ == '__main__':
     world_size = torch.cuda.device_count()
     print(f"Using {world_size} GPUs")
-    num_epochs = 10
-    initial_lr = 0.0016
+    num_epochs = 100
+    initial_lr = 0.001
     batch_size = 2048
     
     # Load your dataset
@@ -287,7 +228,4 @@ if __name__ == '__main__':
     print("Getting data slits...")
     train_data, val_data = pre_split_data(flat_bbs, graph_dict, loaded_targets, fold=0, nfolds=5, testing=False)
     
-    #spawn_workers(world_size, num_epochs, initial_lr, batch_size, loaded_targets, flat_bbs, graph_dict)
     spawn_workers(world_size, num_epochs, initial_lr, batch_size, train_data, val_data)
-
-
