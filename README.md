@@ -1,5 +1,101 @@
 <h1>Leash-Bio Drug Target Interaction Prediction</h1>
 
+<img src="leash-bio.png" alt="Leash-Bio Logo" style="width: 100%;">
+
+<h2>Overview</h2>
+<p>
+This repository contains my contributions to the Predict New Medicines With BELKA competition hosted by Leash Biosciences on Kaggle. The goal of the competition is to use their proprietary data obtained through high-throughput screening to develop an algorithm capable of predicting the binding affinity of small molecules (drugs) to protein targets. This challenge is closely aligned with my Master's research and has long been a significant interest of mine. Moreover, this competition provided a unique opportunity to work with a massive dataset that is rarely accessible outside major pharmaceutical companies, making it an invaluable learning and research opportunity.
+</p>
+
+<h3>Why This Is Important</h3>
+<p>
+The pharmaceutical industry faces the enormous task of identifying effective drug molecules from a potential chemical space of 10^60 molecules. Traditional methods of drug discovery, which involve physical synthesis and testing of molecules, are time-consuming and labor-intensive. By leveraging machine learning (ML) models, we can potentially revolutionize the process of drug discovery, making it faster, more efficient, and cost-effective. Accurate prediction of drug-target interactions is crucial for the development of new treatments for various diseases, ultimately leading to improved patient outcomes and saving lives.
+</p>
+
+<h2>Competition Dates</h2>
+<ul>
+  <li><strong>Start Date:</strong> April 4, 2024</li>
+  <li><strong>Final Submission Deadline:</strong> July 8, 2024</li>
+</ul>
+
+
+<h2>Approach and Strategy</h2>
+<p>
+My approach to tackling this problem was to use Graph Neural Networks (GNNs), which are particularly suited for representing molecular structures in ways that traditional neural networks are not. GNNs consider molecules as graphs, where atoms are nodes and bonds are edges, effectively capturing the molecular topology. The molecules were initially provided in SMILES format, which I converted into graph representations for model training, the code for which can be found in the 'preprocessing' folder.
+</p>
+
+
+<h3>Graph Neural Networks in Molecular Biology</h3>
+<p>
+GNNs have emerged as powerful tools for modeling molecular interactions due to their ability to naturally represent molecular structures. In this project, we used GNNs with 8 node features and 4 edge features, as described in the paper by Hongjie Wu et al. (2024). The paper outlines a multi-modal drug-target affinity prediction model using graph transformers and attention mechanisms (<a href="https://doi.org/10.1016/j.neunet.2023.11.018">Wu et al., 2024</a>).
+</p>
+<p>
+Different approaches were explored for applying GNNs in this context:
+</p>
+<ul>
+  <li><strong>Classical Message Passing:</strong> This approach involves linear transformations of node features based on their neighbors' features, effectively propagating information through the graph.</li>
+  <li><strong>Gated Graph Convolutions:</strong> These convolutions incorporate gating mechanisms to control the flow of information, enhancing the model's ability to capture complex molecular interactions.</li>
+  <li><strong>Attentive-FP:</strong> This method uses attention mechanisms to weigh the importance of different nodes and edges dynamically, providing a more nuanced understanding of the molecular graph.</li>
+</ul>
+<p>
+These techniques allowed for a comprehensive analysis of molecular interactions, leveraging the strengths of GNNs to predict drug-target binding affinities accurately.
+</p>
+
+
+<h3>Data Handling and Model Training</h3>
+<p>The provided dataset, named BELKA, included 133 million small molecules encoded in SMILES format. Given the enormity of the data, efficient handling was crucial:</p>
+<ul>
+  <li><strong>Data Compression:</strong> I compressed the dataset using a dictionary mapping building block IDs to graph representations, which drastically reduced memory usage and improved loading times. The target labels were stored in a compressed <code>.npz</code> file as <code>int16</code> values, further enhancing data management efficiency.</li>
+  <li><strong>Cloud Computing:</strong> The training was conducted on Vastai, a cloud computing platform, utilizing a cluster of 8 GPUs. This setup provided the necessary computational power to handle the extensive data and complex model architecture, facilitating faster iteration and experimentation.</li>
+</ul>
+
+
+
+<h2>Results</h2>
+<p>
+The model achieved a competitive performance in predicting the binding affinity of small molecules to protein targets. The use of GNNs, combined with efficient data handling and powerful computational resources, proved to be an effective approach in this competition. We finished in the top 10% earning a bronze medal. The experience gained from this project will undoubtedly contribute to my ongoing research and future endeavors in the field of computational drug discovery.
+</p>
+
+<h2>Conclusion</h2>
+<p>
+Participating in the Predict New Medicines With BELKA competition was a highly rewarding experience. It provided an opportunity to apply advanced machine learning techniques to a real-world problem with significant implications for the pharmaceutical industry. I am grateful to Leash Biosciences for hosting this competition and providing such a valuable dataset. I look forward to continuing my work in this field and contributing to the development of new and effective medicines.
+</p>
+
+
+<h2>Technical Setup</h2>
+
+<h3>Directory Structure</h3>
+<ul>
+  <li><strong>data/</strong> - Contains the processed datasets, organized for easy access during model training and evaluation.</li>
+  <li><strong>models/</strong> - This directory holds all the trained models. These are version-controlled and pushed to GitHub post-training for reproducibility and collaboration.</li>
+  <li><strong>preprocessing/</strong> - Scripts and utilities used for data preprocessing, including normalization, SMILES conversion, and data augmentation.</li>
+  <li><strong>selfies_modelling/</strong> - Directory for models that specifically use the SELFIES representation for molecules, aiding in specialized neural network training.</li>
+
+  <li><strong>README.md</strong> - Provides an overview of the project, setup instructions, and other essential information.</li>
+  <li><strong>main.py</strong> - The main executable script that orchestrates the training and testing workflows.</li>
+  <li><strong>models.py</strong> - Contains the implementation of various deep learning models used in the project, such as Graph Neural Networks.</li>
+  <li><strong>requirements.txt</strong> - Lists all the dependencies required for the project, ensuring consistent setups across different environments.</li>
+  <li><strong>setup.sh</strong> - Shell script for setting up the project environment, installing dependencies, and performing initial setup tasks.</li>
+  <li><strong>test.py</strong> - Contains the test suite for the project, ensuring all components function correctly before deployment.</li>
+  <li><strong>utils.py</strong> - Auxiliary functions supporting various operations throughout the project, including logging and data handling utilities.</li>
+</ul>
+
+
+
+<h2>Acknowledgments</h2>
+<p>
+I would like to thank Leash Biosciences for organizing this competition and providing the BELKA dataset. Additionally, I appreciate the support of Vastai for providing access to the necessary computational resources to complete this project and Kaggle for hosting it.
+</p>
+
+<h2>References</h2>
+<p>
+For further details on the competition and the dataset, please refer to the <a href="https://www.kaggle.com/competitions/leash-BELKA/overview">Kaggle competition page</a>.
+</p>
+
+
+
+<h1>Try for yourself... </h1>
+
 <h2>Setup</h2>
 
 When working on a new machine, run:
@@ -9,35 +105,6 @@ git clone https://paward35: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@github.com/S
 cd leash_dti/
 chmod +x ./setup.sh
 ./setup.sh
-```
-
-<h2>Datasets </h2>
-
-<h3>5 Million</h3>
-
-```
-wget 'https://storage.googleapis.com/kaggle-data-sets/5014460/8422528/compressed/5mNegs_allp.csv.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20240521%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20240521T091654Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=3df8af588933bb4e00aae68b6ca141af5521f0764063ad60ef17f5de8a643b8585f34e510cd19edecb45fb1c86b8f64f212e63482560020210cc9ace25b10277cf83d53e851dbaf3a184116031b93d53e4ab0ebdc4d7e9d268ef51001fcd6a89fcb8d1abe6369fa87a5eb109b7148443119b1d70affd51ba92dc343ff9facbef4bb7c10f76a3d03504aaf3ef90c4111620a6df140198589fdda2fedadebf9199764ce462c73b0c09f5ad95c12e2e635d26e8a78329026ea89d96d8510bd4467fccc0901dedab8b642003fcc8abcfc115073d08683fce0c4bed5b1d710fee13dc12cb8d20e6670e98bea5a9d28e7d0350955917e1750ac065a748fc41dece2a10' --no-check-certificate -O graph_data_30milly.zip
-cd data
-unzip graph_data_5milly.zip
-cd ..
-```
-
-<h3>11 Million</h3>
-
-```
-wget 'https://storage.googleapis.com/kaggle-data-sets/4936645/8310370/bundle/archive.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20240507%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20240507T142559Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=1ebfdf77d4a7131d53629f37a9ef06b2785758782096673e29453ad15ecf9d29158d70840ce115aac8d28134d48dc7613fcfe65fa88a7d504a2a84a53cd188db400e68e6c5666164ce38c9bc4d1efc264c8f37485571d9b80aa090074d4e22cc37284fcddddd3506e8f1620f986ad463be0ccfe2729ee1d128f7f6b9a6aa629a10de705a1bc77c0e406ea4f34a3653ba31b211c959471be7e15734abb99e9f5ea0d7dde14197a284a94da6edb7795c9be68d523ba33d2ee704bfb505c5e2a933bb87f87c6a9e5dbacb53433f8c327b4b2144bbaec29c496b1be42893a7689829157623f0bd3a9eccfa91fb44555987c0fc992363d80964d9294eb20b47e98c9c' --no-check-certificate -O graph_dataset_11m.zip
-cd data
-unzip graph_dataset_11m.zip
-cd ..
-```
-
-<h3>30 Million</h3>
-
-```
-wget 'https://storage.googleapis.com/kaggle-data-sets/5014460/8422528/compressed/5mNegs_allp.csv.zip?X-Goog-Algorithm=GOOG4-RSA-SHA256&X-Goog-Credential=gcp-kaggle-com%40kaggle-161607.iam.gserviceaccount.com%2F20240515%2Fauto%2Fstorage%2Fgoog4_request&X-Goog-Date=20240515T161116Z&X-Goog-Expires=259200&X-Goog-SignedHeaders=host&X-Goog-Signature=2d71f12444712c64a7d420bd709eb5ef6750d7a7011b30a7ae04b4171444354311481d87182ad315b779a1a722622a6c0b8f85d457504ae1342e62cda46320c9bc1ac068321a6b27f0ad8901e966c6c2ebd39501aa6ba719a6ec42eae2d32395fb108945b5bd44d522761672c650aa922f33325a11128073a49eda7af7ad1cc5a2cd17681fa61f7d45e9e40732303ba358578d377096549493922ad6e36a59dceaee7cdb0720fb977ae077e255601c340341909768e31b532f0c4fbbd840dbdc8dca238d4465d8d37f02ba058d85c5f07a6d89e1fc17e3ad925def750fec9e2008fd9966e783a8dd9ad5da459dbb66193970903f6e0710ee56556c54640fe881' --no-check-certificate -O graph_data_5milly.zip
-cd data
-unzip graph_data_30milly.zip
-cd ..
 ```
 
 <h2>learning </h2>
@@ -52,5 +119,8 @@ python main.py
 watch -n0.1 nvidia-smi
 ```
 
-<h2>Docker Image<h2>
+<h2>Docker Image</h2>
+
+```
 pytorch/pytorch:2.3.0-cuda12.1-cudnn8-runtime
+```
